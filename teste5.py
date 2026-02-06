@@ -69,7 +69,7 @@ def simulador_promocao():
         # Configurações de Regras
         hierarquia = ['SD 1', 'CB', '3º SGT', '2º SGT', '1º SGT', 'SUB TEN', '2º TEN', '1º TEN', 'CAP', 'MAJ', 'TEN CEL', 'CEL']
         vagas_limite = {'SD 1': 600, 'CB': 600, '3º SGT': 573, '2º SGT': 409, '1º SGT': 245, 'SUB TEN': 96, '2º TEN': 34, '1º TEN': 29, 'CAP': 24, 'MAJ': 10, 'TEN CEL': 3, 'CEL': 9999}
-        tempo_minimo = {'SD 1': 5, 'CB': 3, '3º SGT': 3, '2º SGT': 3, '1º SGT': 2, 'SUB TEN': 2, '2º TEN': 3, '1º TEN': 3, 'CAP': 3, 'MAJ': 3, 'TEN CEL': 30}
+        tempo_minimo = {'SD 1': 5, 'CB': 3, '3º SGT': 3, '2º SGT': 3, '1º SGT': 2, 'SUB TEN': 2, '2º TEN': 2, '1º TEN': 3, 'CAP': 3, 'MAJ': 3, 'TEN CEL': 30}
         postos_com_excedente = ['CB', '3º SGT', '2º SGT', '2º TEN', '1º TEN', 'CAP']
 
         # Geração do Ciclo
