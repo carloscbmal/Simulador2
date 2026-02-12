@@ -85,61 +85,65 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
     sobras_por_ciclo = {}
     
     # Controle para não aplicar a regra quântica mais de uma vez para a mesma turma no mesmo ano de serviço
-    # Armazena tuplas: (data_admissao, anos_de_servico)
     turmas_processadas_quantico = set()
 
     for data_referencia in datas_ciclo:
         extras_hoje = (vagas_extras_dict or {}).get(data_referencia, {})
 
-        # --- 1.1 NOVA LÓGICA: GERADOR QUÂNTICO ---
+        # --- 1.1 NOVA LÓGICA: GERADOR QUÂNTICO (COM PROTEÇÕES) ---
         if usar_quantico:
-            # Identificar todas as datas de admissão presentes (turmas)
             turmas = df['Data_Admissao'].dropna().unique()
-            
             militares_para_remover_indices = []
             
             for turma_data in turmas:
                 anos_servico = relativedelta(data_referencia, turma_data).years
                 
-                # Regra: Aos 32, 33 e 34 anos de serviço
+                # O loop já foca em 32, 33, 34, mas aplicaremos o filtro de segurança abaixo
                 if anos_servico in [32, 33, 34]:
                     chave_controle = (turma_data, anos_servico)
                     
-                    # Se esta turma ainda não sofreu o corte para este ano específico
                     if chave_controle not in turmas_processadas_quantico:
-                        # Filtrar militares ativos desta turma
+                        # Seleciona militares ativos desta turma
                         mask_turma = (df['Data_Admissao'] == turma_data)
-                        df_turma = df[mask_turma]
+                        df_turma = df[mask_turma].copy()
                         
+                        # === PROTEÇÃO 2: Remover militares da lista de foco do sorteio ===
+                        if matriculas_foco:
+                            df_turma = df_turma[~df_turma['Matricula'].isin(matriculas_foco)]
+
+                        # === PROTEÇÃO 1: Garantir critério de tempo ou idade ===
+                        # Calculamos a idade para verificar a condição "ou mais de 63 anos"
+                        df_turma['Idade_Calc'] = df_turma['Data_Nascimento'].apply(lambda x: get_anos(data_referencia, x))
+                        
+                        # Filtro: Mantém apenas quem tem (Serviço >= 32) OU (Idade > 63)
+                        # Nota: Como 'anos_servico' aqui é fixo da turma, se for < 32, só passa se Idade > 63.
+                        df_turma = df_turma[ (anos_servico >= 32) | (df_turma['Idade_Calc'] > 63) ]
+
                         if not df_turma.empty:
-                            # Calcular quantidade a remover (arredondando para o inteiro mais próximo)
+                            # Calcular quantidade a remover (baseado na turma filtrada)
                             qtd_remover = math.ceil(len(df_turma) * (perc_quantico / 100.0))
                             
-                            # Seleção aleatória
                             if qtd_remover > 0:
                                 removidos = df_turma.sample(n=min(qtd_remover, len(df_turma)))
                                 militares_para_remover_indices.extend(removidos.index.tolist())
                                 
-                                # Atualizar controle para não processar novamente neste ciclo/ano
+                                # Marca como processado para não repetir neste ano
                                 turmas_processadas_quantico.add(chave_controle)
 
-            # Processar a remoção dos "Quânticos" antes das promoções
+            # Processar a remoção
             if militares_para_remover_indices:
-                # Remove duplicatas de índices caso haja
                 militares_para_remover_indices = list(set(militares_para_remover_indices))
-                
                 df_removidos = df.loc[militares_para_remover_indices].copy()
                 
-                # Atualizar histórico
                 for idx, row in df_removidos.iterrows():
                     m_id = row['Matricula']
+                    # Calcula anos de serviço específico para o log
+                    asv = relativedelta(data_referencia, row['Data_Admissao']).years
                     if m_id in historicos:
-                        historicos[m_id].append(f"⚛️ {data_referencia.strftime('%d/%m/%Y')}: Aposentado pelo Gerador Quântico ({row['Data_Admissao'].strftime('%d/%m/%Y')} - {anos_servico} anos sv)")
+                        historicos[m_id].append(f"⚛️ {data_referencia.strftime('%d/%m/%Y')}: Aposentado pelo Gerador Quântico ({asv} anos sv)")
                 
-                # Atualizar DataFrame principal e inativos
                 df_inativos = pd.concat([df_inativos, df_removidos], ignore_index=True)
                 df = df.drop(index=militares_para_remover_indices).copy()
-
         # --- FIM NOVA LÓGICA ---
 
         sobras_deste_ciclo = {}
@@ -218,7 +222,6 @@ def main():
     st.sidebar.header("⚙️ Configuração")
     tipo_simulacao = st.sidebar.radio("Quadro:", ("QOA/QPC (Administrativo)", "QOMT/QPMT (Condutores)", "QOM/QPM (Músicos)"))
 
-    # Define o dataframe ativo com base na escolha
     if tipo_simulacao == "QOA/QPC (Administrativo)":
         df_ativo = df_militares
         has_aux = (df_condutores is not None) and (df_musicos is not None)
@@ -230,7 +233,6 @@ def main():
         has_aux = False
 
     if df_ativo is not None:
-        # SELEÇÃO DE MATRÍCULAS
         lista_matriculas = sorted(df_ativo['Matricula'].dropna().unique().astype(int))
         matriculas_foco = st.sidebar.multiselect(
             "Matrículas para acompanhar:",
@@ -238,7 +240,6 @@ def main():
             max_selections=5
         )
 
-        # DATA LIMITE 2060
         data_alvo_input = st.sidebar.date_input(
             "Data Alvo:", 
             value=datetime(2030, 12, 31),
@@ -246,7 +247,6 @@ def main():
         )
         tempo_aposentadoria = st.sidebar.slider("Tempo p/ Aposentadoria:", 30, 35, 35)
         
-        # --- 1. BARRA DESLIZANTE QUÂNTICA ---
         st.sidebar.markdown("---")
         usar_quantico = st.sidebar.checkbox("Ativar Gerador Quântico")
         perc_quantico = 0
@@ -258,13 +258,11 @@ def main():
                 value=15,
                 help="muito dificil de explicar, entre em contato com o dono do aplicativo"
             )
-        # --- FIM BARRA DESLIZANTE ---
 
         if st.sidebar.button("🚀 Iniciar Simulação"):
             data_alvo = pd.to_datetime(data_alvo_input)
             
             with st.spinner('Simulando...'):
-                # Lógica para QOA com migração de vagas
                 if tipo_simulacao == "QOA/QPC (Administrativo)":
                     vagas_migradas = {}
                     if df_condutores is not None:
@@ -287,7 +285,6 @@ def main():
 
                 st.success("Simulação Concluída!")
 
-                # EXIBIÇÃO DE HISTÓRICOS EM ABAS
                 if matriculas_foco:
                     st.subheader("📊 Histórico Individual")
                     abas = st.tabs([str(m) for m in matriculas_foco])
@@ -306,7 +303,6 @@ def main():
                             else:
                                 st.error("Status Final: Não encontrado (verifique dados)")
 
-                # DOWNLOADS
                 def to_excel(df):
                     out = io.BytesIO()
                     df.to_excel(out, index=False, engine='xlsxwriter')
