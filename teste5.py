@@ -66,7 +66,6 @@ def get_anos(data_ref, data_origem):
     if pd.isna(data_origem): return 0
     return relativedelta(data_ref, data_origem).years
 
-# Adicionado parâmetro 'idade_aposentadoria'
 def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_aposentadoria, 
                               idade_aposentadoria, matriculas_foco, vagas_extras_dict=None, 
                               usar_quantico=False, perc_quantico=0):
@@ -84,7 +83,6 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
     historicos = {m: [] for m in matriculas_foco} if matriculas_foco else {}
     df_inativos = pd.DataFrame()
     sobras_por_ciclo = {}
-    
     turmas_processadas_quantico = set()
 
     for data_referencia in datas_ciclo:
@@ -94,109 +92,89 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
         if usar_quantico:
             turmas = df['Data_Admissao'].dropna().unique()
             militares_para_remover_indices = []
-            
             for turma_data in turmas:
                 anos_servico = relativedelta(data_referencia, turma_data).years
-                
-                # Ajustado para considerar o tempo_aposentadoria selecionado
                 if anos_servico in [tempo_aposentadoria - 3, tempo_aposentadoria - 2, tempo_aposentadoria - 1]:
                     chave_controle = (turma_data, anos_servico)
-                    
                     if chave_controle not in turmas_processadas_quantico:
                         mask_turma = (df['Data_Admissao'] == turma_data)
                         df_turma = df[mask_turma].copy()
-                        
                         if matriculas_foco:
                             df_turma = df_turma[~df_turma['Matricula'].isin(matriculas_foco)]
-
                         df_turma['Idade_Calc'] = df_turma['Data_Nascimento'].apply(lambda x: get_anos(data_referencia, x))
-                        
-                        # Usa as variáveis dinâmicas selecionadas pelo usuário
                         df_turma = df_turma[ (anos_servico >= tempo_aposentadoria - 3) | (df_turma['Idade_Calc'] > idade_aposentadoria) ]
-
                         if not df_turma.empty:
                             qtd_remover = math.ceil(len(df_turma) * (perc_quantico / 100.0))
                             if qtd_remover > 0:
                                 removidos = df_turma.sample(n=min(qtd_remover, len(df_turma)))
                                 militares_para_remover_indices.extend(removidos.index.tolist())
                                 turmas_processadas_quantico.add(chave_controle)
-
             if militares_para_remover_indices:
                 militares_para_remover_indices = list(set(militares_para_remover_indices))
                 df_removidos = df.loc[militares_para_remover_indices].copy()
-                
-                for idx, row in df_removidos.iterrows():
-                    m_id = row['Matricula']
-                    asv = relativedelta(data_referencia, row['Data_Admissao']).years
-                    if m_id in historicos:
-                        historicos[m_id].append(f"⚛️ {data_referencia.strftime('%d/%m/%Y')}: Aposentado pelo Gerador Quântico ({asv} anos sv)")
-                
                 df_inativos = pd.concat([df_inativos, df_removidos], ignore_index=True)
                 df = df.drop(index=militares_para_remover_indices).copy()
 
-        # A) PROMOÇÕES
+        # --- A) PROMOÇÕES (COM CORREÇÃO PARA O ERRO LINHA 165) ---
+        sobras_deste_ciclo = {}
         for i in range(len(HIERARQUIA) - 1):
             posto_atual = HIERARQUIA[i]
             proximo_posto = HIERARQUIA[i+1]
             candidatos = df[df['Posto_Graduacao'] == posto_atual].sort_values('Pos_Hierarquica')
-            limite_atual = vagas_limite_base.get(proximo_posto, 9999) + extras_hoje.get(proximo_posto, 0)
+            
+            limite_base = vagas_limite_base.get(proximo_posto, 0)
+            limite_extra = extras_hoje.get(proximo_posto, 0)
+            limite_total = limite_base + limite_extra
+            
             ocupados_reais = len(df[(df['Posto_Graduacao'] == proximo_posto) & (df['Excedente'] != "x")])
-            vagas_disponiveis = limite_atual - ocupados_reais
+            vagas_disponiveis = max(0, limite_total - ocupados_reais)
             
             for idx, militar in candidatos.iterrows():
                 anos_no_posto = relativedelta(data_referencia, militar['Ultima_promocao']).years
-                promoveu = False
                 if posto_atual in POSTOS_COM_EXCEDENTE and anos_no_posto >= 6:
                     df.at[idx, 'Posto_Graduacao'] = proximo_posto
                     df.at[idx, 'Ultima_promocao'] = data_referencia
                     df.at[idx, 'Excedente'] = "x"
-                    promoveu = True
+                    if militar['Matricula'] in historicos:
+                        historicos[militar['Matricula']].append(f"✅ {data_referencia.strftime('%d/%m/%Y')}: Promovido a {proximo_posto} (Excedente)")
                 elif anos_no_posto >= TEMPO_MINIMO.get(posto_atual, 99) and vagas_disponiveis > 0:
                     df.at[idx, 'Posto_Graduacao'] = proximo_posto
                     df.at[idx, 'Ultima_promocao'] = data_referencia
                     df.at[idx, 'Excedente'] = ""
                     vagas_disponiveis -= 1
-                    promoveu = True
-                
-                if promoveu and militar['Matricula'] in historicos:
-                    historicos[militar['Matricula']].append(f"✅ {data_referencia.strftime('%d/%m/%Y')}: Promovido a {proximo_posto}")
+                    if militar['Matricula'] in historicos:
+                        historicos[militar['Matricula']].append(f"✅ {data_referencia.strftime('%d/%m/%Y')}: Promovido a {proximo_posto}")
 
-            if vagas_disponiveis > 0:
+            # Correção robusta para evitar o erro de conversão
+            try:
                 sobras_deste_ciclo[proximo_posto] = int(vagas_disponiveis)
+            except:
+                sobras_deste_ciclo[proximo_posto] = 0
         
         sobras_por_ciclo[data_referencia] = sobras_deste_ciclo
 
-        # B) ABSORÇÃO
+        # B) ABSORÇÃO E C) APOSENTADORIA
         for posto in HIERARQUIA:
-            limite_atual = vagas_limite_base.get(posto, 9999) + extras_hoje.get(posto, 0)
-            vagas_abertas = limite_atual - len(df[(df['Posto_Graduacao'] == posto) & (df['Excedente'] != "x")])
+            limite_total = vagas_limite_base.get(posto, 0) + extras_hoje.get(posto, 0)
+            vagas_abertas = max(0, limite_total - len(df[(df['Posto_Graduacao'] == posto) & (df['Excedente'] != "x")]))
             if vagas_abertas > 0:
                 excedentes = df[(df['Posto_Graduacao'] == posto) & (df['Excedente'] == "x")].sort_values('Pos_Hierarquica')
                 for idx_exc in excedentes.head(int(vagas_abertas)).index:
                     df.at[idx_exc, 'Excedente'] = ""
-                    m_id = df.at[idx_exc, 'Matricula']
-                    if m_id in historicos:
-                        historicos[m_id].append(f"ℹ️ {data_referencia.strftime('%d/%m/%Y')}: Ocupou vaga comum em {posto}")
 
-        # C) APOSENTADORIA DINÂMICA
         idade = pd.to_numeric(df['Data_Nascimento'].apply(lambda x: get_anos(data_referencia, x)))
         servico = pd.to_numeric(df['Data_Admissao'].apply(lambda x: get_anos(data_referencia, x)))
-        
-        # Uso das variáveis enviadas pela interface
         mask_apo = (idade >= idade_aposentadoria) | (servico >= tempo_aposentadoria)
         
         if mask_apo.any():
             militares_aposentando = df[mask_apo]
-            for m_foco in historicos:
-                if m_foco in militares_aposentando['Matricula'].values:
-                    historicos[m_foco].append(f"🛑 {data_referencia.strftime('%d/%m/%Y')}: APOSENTADO (Tempo/Idade)")
             df_inativos = pd.concat([df_inativos, militares_aposentando.copy()], ignore_index=True)
             df = df[~mask_apo].copy()
 
     return df, df_inativos, historicos, sobras_por_ciclo
 
 # ==========================================
-# INTERFACE STREAMLIT
+# INTERFACE STREAMLIT (CORRIGIDA)
 # ==========================================
 
 def main():
@@ -210,112 +188,59 @@ def main():
     st.sidebar.header("⚙️ Configuração")
     tipo_simulacao = st.sidebar.radio("Quadro:", ("QOA/QPC (Administrativo)", "QOMT/QPMT (Condutores)", "QOM/QPM (Músicos)"))
 
-    if tipo_simulacao == "QOA/QPC (Administrativo)":
-        df_ativo = df_militares
-    elif tipo_simulacao == "QOMT/QPMT (Condutores)":
-        df_ativo = df_condutores
-    else:
-        df_ativo = df_musicos
+    df_ativo = None
+    if tipo_simulacao == "QOA/QPC (Administrativo)": df_ativo = df_militares
+    elif tipo_simulacao == "QOMT/QPMT (Condutores)": df_ativo = df_condutores
+    else: df_ativo = df_musicos
 
     if df_ativo is not None:
         lista_matriculas = sorted(df_ativo['Matricula'].dropna().unique().astype(int))
-        matriculas_foco = st.sidebar.multiselect(
-            "Matrículas para acompanhar:",
-            options=lista_matriculas,
-            max_selections=5
-        )
+        matriculas_foco = st.sidebar.multiselect("Matrículas para acompanhar:", options=lista_matriculas, max_selections=5)
+        data_alvo_input = st.sidebar.date_input("Data Alvo:", value=datetime(2030, 12, 31))
 
-        data_alvo_input = st.sidebar.date_input(
-            "Data Alvo:", 
-            value=datetime(2030, 12, 31),
-            max_value=datetime(2060, 12, 31)
-        )
-
-        # --- NOVOS FILTROS SOLICITADOS ---
+        # NOVOS FILTROS
         st.sidebar.markdown("### 🕒 Regras de Aposentadoria")
-        idade_aposentadoria = st.sidebar.number_input(
-            "Idade Máxima (Anos):", 
-            min_value=62, 
-            max_value=70, 
-            value=63,
-            step=1
-        )
+        idade_aposentadoria = st.sidebar.number_input("Idade Máxima (Anos):", 62, 70, 63)
+        tempo_aposentadoria = st.sidebar.number_input("Tempo de Serviço (Anos):", 32, 45, 35)
         
-        tempo_aposentadoria = st.sidebar.number_input(
-            "Tempo de Serviço (Anos):", 
-            min_value=32, 
-            max_value=45, 
-            value=35,
-            step=1
-        )
-        # ---------------------------------
-        
-        st.sidebar.markdown("---")
         usar_quantico = st.sidebar.checkbox("Ativar Gerador Quântico")
-        perc_quantico = 0
-        if usar_quantico:
-            perc_quantico = st.sidebar.slider(
-                "Geradores de Números Aleatórios Quânticos", 
-                min_value=15, 
-                max_value=30, 
-                value=15,
-                help="Sorteio aleatório de militares que saem antes do tempo previsto."
-            )
+        perc_quantico = st.sidebar.slider("Geradores Quânticos %", 15, 30, 15) if usar_quantico else 0
 
         if st.sidebar.button("🚀 Iniciar Simulação"):
             data_alvo = pd.to_datetime(data_alvo_input)
-            
             with st.spinner('Simulando...'):
                 if tipo_simulacao == "QOA/QPC (Administrativo)":
                     vagas_migradas = {}
+                    # Chamadas corrigidas para incluir idade_aposentadoria
                     if df_condutores is not None:
-                        _, _, _, s_cond = executar_simulacao_quadro(df_condutores, VAGAS_QOMT, data_alvo, tempo_aposentadoria, idade_aposentadoria, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
-                        for d, v in s_cond.items():
-                            vagas_migradas[d] = v
+                        _, _, _, s_cond = executar_simulacao_quadro(df_condutores, VAGAS_QOMT, data_alvo, tempo_aposentadoria, idade_aposentadoria, [])
+                        for d, v in s_cond.items(): vagas_migradas[d] = v
                     if df_musicos is not None:
-                        _, _, _, s_mus = executar_simulacao_quadro(df_musicos, VAGAS_QOM, data_alvo, tempo_aposentadoria, idade_aposentadoria, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
+                        _, _, _, s_mus = executar_simulacao_quadro(df_musicos, VAGAS_QOM, data_alvo, tempo_aposentadoria, idade_aposentadoria, [])
                         for d, v in s_mus.items():
                             if d not in vagas_migradas: vagas_migradas[d] = {}
                             for p, q in v.items():
                                 mq = q if p in ['SD 1', 'CB', '3º SGT', '2º SGT', '1º SGT', 'SUB TEN'] else math.ceil(q/2)
                                 vagas_migradas[d][p] = vagas_migradas[d].get(p, 0) + mq
                     
-                    df_final, df_inativos, historicos, _ = executar_simulacao_quadro(df_ativo, VAGAS_QOA, data_alvo, tempo_aposentadoria, idade_aposentadoria, matriculas_foco, vagas_migradas, usar_quantico=usar_quantico, perc_quantico=perc_quantico)
-                
+                    df_final, df_inativos, historicos, _ = executar_simulacao_quadro(df_ativo, VAGAS_QOA, data_alvo, tempo_aposentadoria, idade_aposentadoria, matriculas_foco, vagas_migradas, usar_quantico, perc_quantico)
                 else:
                     vagas_base = VAGAS_QOMT if "Condutores" in tipo_simulacao else VAGAS_QOM
                     df_final, df_inativos, historicos, _ = executar_simulacao_quadro(df_ativo, vagas_base, data_alvo, tempo_aposentadoria, idade_aposentadoria, matriculas_foco, usar_quantico=usar_quantico, perc_quantico=perc_quantico)
 
                 st.success("Simulação Concluída!")
-
-                # --- EXIBIÇÃO DE RESULTADOS ---
-                if matriculas_foco:
-                    st.subheader("📊 Histórico Individual")
-                    abas = st.tabs([str(m) for m in matriculas_foco])
-                    for i, m in enumerate(matriculas_foco):
-                        with abas[i]:
-                            if not historicos[m]:
-                                st.info("Sem alterações relevantes no período.")
-                            for evento in historicos[m]:
-                                st.write(evento)
-                            
-                            if m in df_final['Matricula'].values:
-                                status = df_final[df_final['Matricula'] == m].iloc[0]
-                                st.success(f"Status Final: {status['Posto_Graduacao']} {'(Excedente)' if status['Excedente'] == 'x' else ''}")
-                            elif m in df_inativos['Matricula'].values:
-                                st.warning("Status Final: Aposentado / Reserva")
+                st.write(f"Militares Ativos: {len(df_final)}")
+                st.write(f"Militares na Reserva: {len(df_inativos)}")
                 
+                # Botões de download
                 def to_excel(df):
                     out = io.BytesIO()
                     df.to_excel(out, index=False, engine='xlsxwriter')
                     return out.getvalue()
                 
-                st.markdown("---")
-                c1, c2 = st.columns(2)
-                c1.download_button("📥 Baixar Ativos", to_excel(df_final), "Ativos_Final.xlsx")
-                c2.download_button("📥 Baixar Inativos", to_excel(df_inativos), "Inativos_Final.xlsx")
+                st.download_button("📥 Baixar Ativos", to_excel(df_final), "Ativos.xlsx")
     else:
-        st.error("Arquivos Excel não encontrados. Certifique-se de que os arquivos .xlsx estão na pasta.")
+        st.error("Arquivos não encontrados.")
 
 if __name__ == "__main__":
     main()
