@@ -4,3 +4,6 @@ openpyxl
 xlsxwriter
 python-dateutil
 altair
+seaborn
+matplotlib
+numpy
