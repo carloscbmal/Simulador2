@@ -1,0 +1,13 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+
+# Configurações locais do Claude Code
+.claude/
+
+# Arquivos temporários de Excel
+~$*.xlsx
