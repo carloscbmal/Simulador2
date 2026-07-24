@@ -606,14 +606,9 @@ def render_unico(res):
     matriculas_foco, df_inicial = res['matriculas_foco'], res['df_inicial']
 
     st.success("Simulação Estratégica Concluída!")
-    st.markdown("### 📊 Panorama Geral ao Final da Simulação")
-    renderizar_kpis(df_final, df_inativos, log_mapas)
-    st.markdown("---")
 
-    aba_hist, aba_vagas, aba_excedentes, aba_promocoes, aba_gargalos, aba_piramide, aba_turmas, aba_spread = st.tabs([
-        "👤 Histórico Individual", "🟦 Mapa de Claros", "🟥 Mapa de Excedentes",
-        "🟩 Volume de Promoções", "⏳ Gargalos de Carreira", "📈 Distribuição do Efetivo",
-        "🎓 Análise por Turma", "🌀 Spread Animado",
+    aba_hist, aba_spread, aba_mais = st.tabs([
+        "👤 Histórico Individual", "🌀 Spread Animado", "📂 Mais informações",
     ])
 
     with aba_hist:
@@ -625,28 +620,39 @@ def render_unico(res):
                     for ev in historicos[m]: st.write(ev)
         else:
             st.info("Selecione matrículas na barra lateral.")
-    with aba_vagas: plotar_heatmap_log(log_mapas, 'vagas_iniciais', "Vagas Ociosas por Data", "Blues", "Qtd Vagas")
-    with aba_excedentes: plotar_heatmap_log(log_mapas, 'excedentes', "Excedentes por Data", "Reds", "Qtd Excedentes")
-    with aba_promocoes: plotar_heatmap_log(log_mapas, 'promocoes', "Militares Promovidos por Data", "Greens", "Qtd Promovidos")
-    with aba_gargalos: plotar_gargalos(tempos_log)
-    with aba_piramide: plotar_piramide(df_final, data_alvo)
-    with aba_turmas:
-        st.markdown("#### Comparação entre turmas")
-        comparar_turmas(df_inicial, df_final, df_inativos)
-        st.markdown("---")
-        anos = _anos_turmas(df_inicial)
-        ano_sel = st.selectbox("Detalhar turma (ano de admissão):", anos, key="turma_unico")
-        quadro_geral_turma(df_inicial, df_final, df_inativos, ano_sel)
-        st.markdown("##### Distribuição dos ativos por posto")
-        analisar_turma_snapshot(df_inicial, df_final, df_inativos, ano_sel, mostrar_kpis=False)
-        st.markdown("##### Trajetória ao longo dos ciclos")
-        plotar_trajetoria_turma(log_mapas, ano_sel)
     with aba_spread:
         renderizar_spread_animado(res)
+    with aba_mais:
+        st.markdown("### 📊 Panorama Geral ao Final da Simulação")
+        renderizar_kpis(df_final, df_inativos, log_mapas)
+        st.markdown("---")
 
-    st.markdown("---")
-    st.markdown("### 📥 Exportar Resultados")
-    botoes_download(df_final, df_inativos, sufixo="unico")
+        aba_vagas, aba_excedentes, aba_promocoes, aba_gargalos, aba_piramide, aba_turmas = st.tabs([
+            "🟦 Mapa de Claros", "🟥 Mapa de Excedentes",
+            "🟩 Volume de Promoções", "⏳ Gargalos de Carreira", "📈 Distribuição do Efetivo",
+            "🎓 Análise por Turma",
+        ])
+
+        with aba_vagas: plotar_heatmap_log(log_mapas, 'vagas_iniciais', "Vagas Ociosas por Data", "Blues", "Qtd Vagas")
+        with aba_excedentes: plotar_heatmap_log(log_mapas, 'excedentes', "Excedentes por Data", "Reds", "Qtd Excedentes")
+        with aba_promocoes: plotar_heatmap_log(log_mapas, 'promocoes', "Militares Promovidos por Data", "Greens", "Qtd Promovidos")
+        with aba_gargalos: plotar_gargalos(tempos_log)
+        with aba_piramide: plotar_piramide(df_final, data_alvo)
+        with aba_turmas:
+            st.markdown("#### Comparação entre turmas")
+            comparar_turmas(df_inicial, df_final, df_inativos)
+            st.markdown("---")
+            anos = _anos_turmas(df_inicial)
+            ano_sel = st.selectbox("Detalhar turma (ano de admissão):", anos, key="turma_unico")
+            quadro_geral_turma(df_inicial, df_final, df_inativos, ano_sel)
+            st.markdown("##### Distribuição dos ativos por posto")
+            analisar_turma_snapshot(df_inicial, df_final, df_inativos, ano_sel, mostrar_kpis=False)
+            st.markdown("##### Trajetória ao longo dos ciclos")
+            plotar_trajetoria_turma(log_mapas, ano_sel)
+
+        st.markdown("---")
+        st.markdown("### 📥 Exportar Resultados")
+        botoes_download(df_final, df_inativos, sufixo="unico")
 
 def render_comparacao(res):
     data_alvo = res['data_alvo']
