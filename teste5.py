@@ -38,7 +38,7 @@ VAGAS_QOMT = {
 
 VAGAS_QOM = {
     'SD 1': 0, 'CB': 0,
-    '3º SGT': 0, '2º SGT': 6, '1º SGT': 10, 'SUB TEN': 5, 
+    '3º SGT': 0, '2º SGT': 6, '1º SGT': 10, 'SUB TEN': 5,
     '2º TEN': 11, '1º TEN': 9, 'CAP': 6, 'MAJ': 4, 'TEN CEL': 2, 'CEL': 0
 }
 
@@ -70,6 +70,8 @@ def carregar_dados(nome_arquivo):
 def get_anos(data_ref, data_origem):
     if pd.isna(data_origem): return 0
     return relativedelta(data_ref, data_origem).years
+
+import spread_view  # após get_anos: spread_view (via analise_spread) importa este módulo
 
 def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_aposentadoria, 
                               idade_aposentadoria, matriculas_foco, vagas_extras_dict=None, 
@@ -561,6 +563,39 @@ def quadro_geral_turma(df_inicial, df_final, df_inativos, ano):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"dl_turma_{ano}", use_container_width=True)
 
+def renderizar_spread_animado(res):
+    """Animação do spread das turmas (turmas reais + turma teórica), com as
+    matrículas acompanhadas (barra lateral) acesas em destaque e aposentadoria
+    conforme os parâmetros da simulação (tempo de serviço / idade)."""
+    tipo_simulacao = res.get('tipo_simulacao')
+    tempo_apo, idade_apo = res.get('tempo_apo'), res.get('idade_apo')
+    matriculas_foco, df_inicial = res['matriculas_foco'], res['df_inicial']
+
+    st.caption(
+        f"Aposentadoria usada nesta animação: **{tempo_apo} anos de serviço / {idade_apo} de idade** "
+        f"(os mesmos parâmetros da simulação ao lado). Matrículas acompanhadas: "
+        f"{', '.join(str(m) for m in matriculas_foco) if matriculas_foco else 'nenhuma selecionada'}."
+    )
+
+    assinatura = (tipo_simulacao, tempo_apo, idade_apo, tuple(sorted(matriculas_foco)))
+    cache = st.session_state.get('spread_cache')
+    desatualizado = not cache or cache['assinatura'] != assinatura
+    rotulo_botao = "🔄 Gerar animação do spread" if desatualizado else "🔄 Regenerar animação do spread"
+    if desatualizado:
+        st.info("Parâmetros mudaram (ou é a primeira vez): clique para (re)gerar a animação.")
+    if st.button(rotulo_botao, use_container_width=True):
+        with st.spinner("Simulando trajetória completa das turmas (pode levar alguns segundos)..."):
+            dados = spread_view.montar_dados_spread(
+                tipo_simulacao, df_inicial, res.get('df_condutores'), res.get('df_musicos'),
+                tempo_apo, idade_apo, matriculas_foco,
+            )
+        st.session_state['spread_cache'] = {'assinatura': assinatura, 'dados': dados}
+        cache = st.session_state['spread_cache']
+
+    if cache:
+        spread_view.render(cache['dados'])
+
+
 # ==========================================
 # RENDERIZAÇÃO DOS RESULTADOS (a partir do estado salvo)
 # ==========================================
@@ -575,10 +610,10 @@ def render_unico(res):
     renderizar_kpis(df_final, df_inativos, log_mapas)
     st.markdown("---")
 
-    aba_hist, aba_vagas, aba_excedentes, aba_promocoes, aba_gargalos, aba_piramide, aba_turmas = st.tabs([
+    aba_hist, aba_vagas, aba_excedentes, aba_promocoes, aba_gargalos, aba_piramide, aba_turmas, aba_spread = st.tabs([
         "👤 Histórico Individual", "🟦 Mapa de Claros", "🟥 Mapa de Excedentes",
         "🟩 Volume de Promoções", "⏳ Gargalos de Carreira", "📈 Distribuição do Efetivo",
-        "🎓 Análise por Turma",
+        "🎓 Análise por Turma", "🌀 Spread Animado",
     ])
 
     with aba_hist:
@@ -606,6 +641,8 @@ def render_unico(res):
         analisar_turma_snapshot(df_inicial, df_final, df_inativos, ano_sel, mostrar_kpis=False)
         st.markdown("##### Trajetória ao longo dos ciclos")
         plotar_trajetoria_turma(log_mapas, ano_sel)
+    with aba_spread:
+        renderizar_spread_animado(res)
 
     st.markdown("---")
     st.markdown("### 📥 Exportar Resultados")
@@ -709,6 +746,8 @@ def main():
                         'modo': 'unico', 'data_alvo': data_alvo, 'df_inicial': df_ativo.copy(),
                         'df_final': df_final, 'df_inativos': df_inativos, 'historicos': historicos,
                         'log_mapas': log_mapas, 'tempos_log': tempos_log, 'matriculas_foco': matriculas_foco,
+                        'tipo_simulacao': tipo_simulacao, 'tempo_apo': tempo_a, 'idade_apo': idade_a,
+                        'df_condutores': df_condutores, 'df_musicos': df_musicos,
                     }
 
         # Renderiza a partir do estado salvo: assim trocar de turma/aba ou baixar Excel
