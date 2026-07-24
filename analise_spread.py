@@ -229,12 +229,12 @@ def vagas_migradas_qoa(df_condutores, df_musicos, data_alvo, tempo_apo, idade_ap
     """Reproduz a migração de sobras (condutores + músicos) para o QOA (como no app)."""
     migradas = {}
     if df_condutores is not None:
-        _, _, _, s_cond, _, _ = t5.executar_simulacao_quadro(
+        _, _, _, s_cond, _, _, _ = t5.executar_simulacao_quadro(
             df_condutores, VAGAS_QOMT, data_alvo, tempo_apo, idade_apo, [])
         for d, v in s_cond.items():
             migradas[d] = dict(v)
     if df_musicos is not None:
-        _, _, _, s_mus, _, _ = t5.executar_simulacao_quadro(
+        _, _, _, s_mus, _, _, _ = t5.executar_simulacao_quadro(
             df_musicos, VAGAS_QOM, data_alvo, tempo_apo, idade_apo, [])
         base_praca = ['SD 1', 'CB', '3º SGT', '2º SGT', '1º SGT', 'SUB TEN']
         for d, v in s_mus.items():

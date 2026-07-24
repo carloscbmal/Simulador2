@@ -88,6 +88,7 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
     datas_ciclo.sort()
 
     historicos = {m: [] for m in matriculas_foco} if matriculas_foco else {}
+    alertas_risco = {m: [] for m in matriculas_foco} if matriculas_foco else {}
     df_inativos = pd.DataFrame()
     sobras_por_ciclo = {}
     
@@ -156,14 +157,16 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
             limite_atual = vagas_limite_base.get(proximo_posto, 9999) + extras_hoje.get(proximo_posto, 0)
             ocupados_reais = len(df[(df['Posto_Graduacao'] == proximo_posto) & (df['Excedente'] != "x")])
             vagas_disponiveis = max(0, limite_atual - ocupados_reais)
-            
+            tempo_minimo_posto = TEMPO_MINIMO.get(posto_atual, 99)
+            registro_ciclo_posto = []  # p/ detectar risco de "furo de antiguidade" (merecimento)
+
             for idx, militar in candidatos.iterrows():
                 anos_no_posto = relativedelta(data_referencia, militar['Ultima_promocao']).years
                 promoveu = False
                 # Vaga real tem prioridade: como os candidatos são percorridos por
                 # antiguidade (Pos_Hierarquica), o mais antigo apto ocupa a vaga aberta.
                 # Só depois de esgotadas as vagas reais os ≥6 anos restantes viram excedente.
-                if anos_no_posto >= TEMPO_MINIMO.get(posto_atual, 99) and vagas_disponiveis > 0:
+                if anos_no_posto >= tempo_minimo_posto and vagas_disponiveis > 0:
                     df.at[idx, 'Posto_Graduacao'] = proximo_posto
                     df.at[idx, 'Ultima_promocao'] = data_referencia
                     df.at[idx, 'Excedente'] = ""
@@ -174,14 +177,56 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
                     df.at[idx, 'Ultima_promocao'] = data_referencia
                     df.at[idx, 'Excedente'] = "x"
                     promoveu = True
-                
+
                 if promoveu:
                     promocoes_ciclo_log[proximo_posto] += 1
                     tempos_promocao_log[proximo_posto].append(anos_no_posto) # Registra o gargalo
                     if militar['Matricula'] in historicos:
                         historicos[militar['Matricula']].append(f"✅ {data_referencia.strftime('%d/%m/%Y')}: Promovido a {proximo_posto}")
 
+                registro_ciclo_posto.append({
+                    'matricula': militar['Matricula'], 'promoveu': promoveu,
+                    'anos_no_posto': anos_no_posto, 'data_admissao': militar['Data_Admissao'],
+                })
+
             sobras_deste_ciclo[proximo_posto] = int(vagas_disponiveis)
+
+            # --- ALERTA: risco de "merecimento" passar à frente da antiguidade ---
+            # Sempre que sobra mais de um apto sem vaga (aptos = anos_no_posto >= tempo
+            # mínimo, sem ter virado nem excedente) no mesmo posto/ciclo, todos eles estão
+            # empatados no único critério objetivo do simulador (tempo mínimo cumprido) —
+            # só a antiguidade os separa daqui pra frente, e é exatamente essa situação que
+            # abre espaço para o critério de merecimento (não modelado aqui) reordená-los.
+            if matriculas_foco:
+                estagnados = [r for r in registro_ciclo_posto
+                              if not r['promoveu'] and r['anos_no_posto'] >= tempo_minimo_posto]
+                if len(estagnados) > 1:
+                    for r in estagnados:
+                        if r['matricula'] not in alertas_risco:
+                            continue
+                        # "Turma" = ano de admissão (mesmo critério usado na Análise por Turma e no
+                        # Spread Animado); ignora colegas da própria turma, só concorrentes de turma
+                        # (ano) mais nova contam como risco de furo de antiguidade.
+                        ano_r = pd.Timestamp(r['data_admissao']).year if pd.notna(r['data_admissao']) else None
+                        concorrentes = [e for e in estagnados
+                                        if e['matricula'] != r['matricula']
+                                        and pd.notna(e['data_admissao']) and ano_r is not None
+                                        and pd.Timestamp(e['data_admissao']).year > ano_r]
+                        if not concorrentes:
+                            continue
+                        turmas_concorrentes = sorted({int(pd.Timestamp(e['data_admissao']).year) for e in concorrentes})
+                        alertas_risco[r['matricula']].append({
+                            'data': data_referencia, 'posto': posto_atual,
+                            'anos_no_posto': r['anos_no_posto'],
+                            'turmas_concorrentes': turmas_concorrentes,
+                            'qtd_concorrentes': len(concorrentes),
+                        })
+                        turmas_txt = ', '.join(str(a) for a in turmas_concorrentes)
+                        historicos[r['matricula']].append(
+                            f"⚠️ {data_referencia.strftime('%d/%m/%Y')}: RISCO DE MERECIMENTO em {posto_atual} — "
+                            f"apto há {r['anos_no_posto']} anos mas sem vaga, empatado com {len(concorrentes)} "
+                            f"militar(es) de turma(s) mais nova(s) ({turmas_txt}) também aptos"
+                        )
         sobras_por_ciclo[data_referencia] = sobras_deste_ciclo
 
         # --- B) ABSORÇÃO ---
@@ -231,17 +276,17 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
                     turmas_dist.setdefault(int(ano), {})[posto] = int(qtd)
         log_geral_mapas[data_referencia]['turmas_dist'] = turmas_dist
 
-    return df, df_inativos, historicos, sobras_por_ciclo, log_geral_mapas, tempos_promocao_log
+    return df, df_inativos, historicos, sobras_por_ciclo, log_geral_mapas, tempos_promocao_log, alertas_risco
 
 # Wrapper para rodar os cenários de forma limpa
 def rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_apo, idade_apo, matriculas_foco, usar_quantico, perc_quantico):
     if tipo_simulacao == "QOA/QPC (Administrativo)":
         vagas_migradas = {}
         if df_condutores is not None:
-            _, _, _, s_cond, _, _ = executar_simulacao_quadro(df_condutores, VAGAS_QOMT, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
+            _, _, _, s_cond, _, _, _ = executar_simulacao_quadro(df_condutores, VAGAS_QOMT, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
             for d, v in s_cond.items(): vagas_migradas[d] = v
         if df_musicos is not None:
-            _, _, _, s_mus, _, _ = executar_simulacao_quadro(df_musicos, VAGAS_QOM, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
+            _, _, _, s_mus, _, _, _ = executar_simulacao_quadro(df_musicos, VAGAS_QOM, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
             for d, v in s_mus.items():
                 if d not in vagas_migradas: vagas_migradas[d] = {}
                 for p, q in v.items():
@@ -613,9 +658,20 @@ def render_unico(res):
 
     with aba_hist:
         if matriculas_foco:
+            alertas_risco = res.get('alertas_risco', {})
             sub_abas = st.tabs([str(m) for m in matriculas_foco])
             for i, m in enumerate(matriculas_foco):
                 with sub_abas[i]:
+                    riscos_m = alertas_risco.get(m, [])
+                    if riscos_m:
+                        turmas = sorted({a for r in riscos_m for a in r['turmas_concorrentes']})
+                        st.warning(
+                            f"⚠️ **Risco de merecimento**: em {len(riscos_m)} ciclo(s), esta matrícula ficou "
+                            f"apta e sem vaga junto com militar(es) de turma(s) mais nova(s) "
+                            f"({', '.join(str(a) for a in turmas)}) no mesmo posto. Como o simulador segue "
+                            f"apenas antiguidade, isso **não significa** que o merecimento vai passar à "
+                            f"frente — só marca os momentos em que isso seria *possível*."
+                        )
                     if not historicos[m]: st.info("Sem alterações.")
                     for ev in historicos[m]: st.write(ev)
         else:
@@ -739,19 +795,20 @@ def main():
             data_alvo = pd.to_datetime(data_alvo_input)
             with st.spinner('Processando matrizes multidimensionais...'):
                 if comparar_cenarios:
-                    df_fin_A, df_in_A, _, _, log_A, _ = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
-                    df_fin_B, df_in_B, _, _, log_B, _ = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_b, idade_b, matriculas_foco, usar_quantico, perc_quantico)
+                    df_fin_A, df_in_A, _, _, log_A, _, _ = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
+                    df_fin_B, df_in_B, _, _, log_B, _, _ = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_b, idade_b, matriculas_foco, usar_quantico, perc_quantico)
                     st.session_state['resultado'] = {
                         'modo': 'comparar', 'data_alvo': data_alvo, 'df_inicial': df_ativo.copy(),
                         'tempo_a': tempo_a, 'idade_a': idade_a, 'tempo_b': tempo_b, 'idade_b': idade_b,
                         'A': (df_fin_A, df_in_A, log_A), 'B': (df_fin_B, df_in_B, log_B),
                     }
                 else:
-                    df_final, df_inativos, historicos, _, log_mapas, tempos_log = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
+                    df_final, df_inativos, historicos, _, log_mapas, tempos_log, alertas_risco = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
                     st.session_state['resultado'] = {
                         'modo': 'unico', 'data_alvo': data_alvo, 'df_inicial': df_ativo.copy(),
                         'df_final': df_final, 'df_inativos': df_inativos, 'historicos': historicos,
                         'log_mapas': log_mapas, 'tempos_log': tempos_log, 'matriculas_foco': matriculas_foco,
+                        'alertas_risco': alertas_risco,
                         'tipo_simulacao': tipo_simulacao, 'tempo_apo': tempo_a, 'idade_apo': idade_a,
                         'df_condutores': df_condutores, 'df_musicos': df_musicos,
                     }
