@@ -659,6 +659,13 @@ def renderizar_spread_animado(res):
     tempo_apo, idade_apo = res.get('tempo_apo'), res.get('idade_apo')
     matriculas_foco, df_inicial = res['matriculas_foco'], res['df_inicial']
 
+    # Sessão antiga (resultado processado por uma versão anterior do app):
+    # faltam os parâmetros necessários — pede reprocessamento em vez de quebrar.
+    if tipo_simulacao is None or tempo_apo is None or idade_apo is None:
+        st.warning("Estes resultados foram gerados por uma versão anterior do app. "
+                   "Clique em **🚀 Processar Simulação Estratégica** novamente para habilitar o spread.")
+        return
+
     st.caption(
         f"Aposentadoria usada nesta animação: **{tempo_apo} anos de serviço / {idade_apo} de idade** "
         f"(os mesmos parâmetros da simulação ao lado). Matrículas acompanhadas: "
