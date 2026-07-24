@@ -191,42 +191,48 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
 
             sobras_deste_ciclo[proximo_posto] = int(vagas_disponiveis)
 
-            # --- ALERTA: risco de "merecimento" passar à frente da antiguidade ---
+            # --- ALERTA: "pernada" (merecimento passa à frente da antiguidade) ---
             # Sempre que sobra mais de um apto sem vaga (aptos = anos_no_posto >= tempo
             # mínimo, sem ter virado nem excedente) no mesmo posto/ciclo, todos eles estão
             # empatados no único critério objetivo do simulador (tempo mínimo cumprido) —
             # só a antiguidade os separa daqui pra frente, e é exatamente essa situação que
-            # abre espaço para o critério de merecimento (não modelado aqui) reordená-los.
+            # abre espaço para o merecimento (não modelado aqui) reordená-los. "Turma" = ano
+            # de admissão. Dois lados: turma mais nova empatada -> risco de LEVAR pernada;
+            # turma mais antiga empatada -> chance de DAR pernada (ultrapassar o mais antigo).
             if matriculas_foco:
                 estagnados = [r for r in registro_ciclo_posto
                               if not r['promoveu'] and r['anos_no_posto'] >= tempo_minimo_posto]
                 if len(estagnados) > 1:
                     for r in estagnados:
-                        if r['matricula'] not in alertas_risco:
+                        if r['matricula'] not in alertas_risco or pd.isna(r['data_admissao']):
                             continue
-                        # "Turma" = ano de admissão (mesmo critério usado na Análise por Turma e no
-                        # Spread Animado); ignora colegas da própria turma, só concorrentes de turma
-                        # (ano) mais nova contam como risco de furo de antiguidade.
-                        ano_r = pd.Timestamp(r['data_admissao']).year if pd.notna(r['data_admissao']) else None
-                        concorrentes = [e for e in estagnados
-                                        if e['matricula'] != r['matricula']
-                                        and pd.notna(e['data_admissao']) and ano_r is not None
-                                        and pd.Timestamp(e['data_admissao']).year > ano_r]
-                        if not concorrentes:
-                            continue
-                        turmas_concorrentes = sorted({int(pd.Timestamp(e['data_admissao']).year) for e in concorrentes})
-                        alertas_risco[r['matricula']].append({
-                            'data': data_referencia, 'posto': posto_atual,
-                            'anos_no_posto': r['anos_no_posto'],
-                            'turmas_concorrentes': turmas_concorrentes,
-                            'qtd_concorrentes': len(concorrentes),
-                        })
-                        turmas_txt = ', '.join(str(a) for a in turmas_concorrentes)
-                        historicos[r['matricula']].append(
-                            f"⚠️ {data_referencia.strftime('%d/%m/%Y')}: RISCO DE MERECIMENTO em {posto_atual} — "
-                            f"apto há {r['anos_no_posto']} anos mas sem vaga, empatado com {len(concorrentes)} "
-                            f"militar(es) de turma(s) mais nova(s) ({turmas_txt}) também aptos"
-                        )
+                        ano_r = pd.Timestamp(r['data_admissao']).year
+                        anos_outros = [pd.Timestamp(e['data_admissao']).year for e in estagnados
+                                       if e['matricula'] != r['matricula'] and pd.notna(e['data_admissao'])]
+                        turmas_novas = sorted({a for a in anos_outros if a > ano_r})
+                        turmas_antigas = sorted({a for a in anos_outros if a < ano_r})
+                        data_txt = data_referencia.strftime('%d/%m/%Y')
+
+                        if turmas_novas:
+                            alertas_risco[r['matricula']].append({
+                                'data': data_referencia, 'posto': posto_atual, 'tipo': 'levar',
+                                'anos_no_posto': r['anos_no_posto'], 'turmas': turmas_novas,
+                            })
+                            historicos[r['matricula']].append(
+                                f"⚠️ {data_txt}: pode LEVAR PERNADA em {posto_atual} — apto há "
+                                f"{r['anos_no_posto']} anos sem vaga, empatado com turma(s) mais nova(s) "
+                                f"({', '.join(map(str, turmas_novas))}) também apta(s)"
+                            )
+                        if turmas_antigas:
+                            alertas_risco[r['matricula']].append({
+                                'data': data_referencia, 'posto': posto_atual, 'tipo': 'dar',
+                                'anos_no_posto': r['anos_no_posto'], 'turmas': turmas_antigas,
+                            })
+                            historicos[r['matricula']].append(
+                                f"⬆️ {data_txt}: pode DAR PERNADA em {posto_atual} — apto há "
+                                f"{r['anos_no_posto']} anos sem vaga, empatado com turma(s) mais antiga(s) "
+                                f"({', '.join(map(str, turmas_antigas))}) que pode ultrapassar"
+                            )
         sobras_por_ciclo[data_referencia] = sobras_deste_ciclo
 
         # --- B) ABSORÇÃO ---
@@ -663,14 +669,29 @@ def render_unico(res):
             for i, m in enumerate(matriculas_foco):
                 with sub_abas[i]:
                     riscos_m = alertas_risco.get(m, [])
-                    if riscos_m:
-                        turmas = sorted({a for r in riscos_m for a in r['turmas_concorrentes']})
+                    levar = [r for r in riscos_m if r['tipo'] == 'levar']
+                    dar = [r for r in riscos_m if r['tipo'] == 'dar']
+                    if levar:
+                        ciclos = len({r['data'] for r in levar})
+                        turmas = sorted({a for r in levar for a in r['turmas']})
                         st.warning(
-                            f"⚠️ **Risco de merecimento**: em {len(riscos_m)} ciclo(s), esta matrícula ficou "
-                            f"apta e sem vaga junto com militar(es) de turma(s) mais nova(s) "
-                            f"({', '.join(str(a) for a in turmas)}) no mesmo posto. Como o simulador segue "
-                            f"apenas antiguidade, isso **não significa** que o merecimento vai passar à "
-                            f"frente — só marca os momentos em que isso seria *possível*."
+                            f"⚠️ **Risco de LEVAR pernada** em {ciclos} ciclo(s): esta matrícula ficou apta e "
+                            f"sem vaga junto com turma(s) mais nova(s) ({', '.join(map(str, turmas))}) no mesmo "
+                            f"posto. Pelo merecimento, um militar mais novo pode ser promovido antes."
+                        )
+                    if dar:
+                        ciclos = len({r['data'] for r in dar})
+                        turmas = sorted({a for r in dar for a in r['turmas']})
+                        st.success(
+                            f"⬆️ **Chance de DAR pernada** em {ciclos} ciclo(s): esta matrícula ficou apta e sem "
+                            f"vaga junto com turma(s) mais antiga(s) ({', '.join(map(str, turmas))}) no mesmo "
+                            f"posto. Pelo merecimento, esta matrícula pode ultrapassar um militar mais antigo."
+                        )
+                    if levar or dar:
+                        st.caption(
+                            "Como o simulador segue apenas a antiguidade, estes marcadores indicam onde a "
+                            "*pernada* seria **possível** pelo merecimento (critério que depende de cursos e "
+                            "não é público) — não uma certeza. Veja as datas exatas na linha do tempo abaixo."
                         )
                     if not historicos[m]: st.info("Sem alterações.")
                     for ev in historicos[m]: st.write(ev)
