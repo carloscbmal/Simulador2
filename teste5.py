@@ -211,28 +211,20 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
                                        if e['matricula'] != r['matricula'] and pd.notna(e['data_admissao'])]
                         turmas_novas = sorted({a for a in anos_outros if a > ano_r})
                         turmas_antigas = sorted({a for a in anos_outros if a < ano_r})
-                        data_txt = data_referencia.strftime('%d/%m/%Y')
 
+                        # Registrado só em alertas_risco (estruturado). NÃO entra em
+                        # historicos: a trajetória de carreira e as pernadas são exibidas
+                        # separadamente, e as pernadas são compactadas em faixas na UI.
                         if turmas_novas:
                             alertas_risco[r['matricula']].append({
                                 'data': data_referencia, 'posto': posto_atual, 'tipo': 'levar',
                                 'anos_no_posto': r['anos_no_posto'], 'turmas': turmas_novas,
                             })
-                            historicos[r['matricula']].append(
-                                f"⚠️ {data_txt}: pode LEVAR PERNADA em {posto_atual} — apto há "
-                                f"{r['anos_no_posto']} anos sem vaga, empatado com turma(s) mais nova(s) "
-                                f"({', '.join(map(str, turmas_novas))}) também apta(s)"
-                            )
                         if turmas_antigas:
                             alertas_risco[r['matricula']].append({
                                 'data': data_referencia, 'posto': posto_atual, 'tipo': 'dar',
                                 'anos_no_posto': r['anos_no_posto'], 'turmas': turmas_antigas,
                             })
-                            historicos[r['matricula']].append(
-                                f"⬆️ {data_txt}: pode DAR PERNADA em {posto_atual} — apto há "
-                                f"{r['anos_no_posto']} anos sem vaga, empatado com turma(s) mais antiga(s) "
-                                f"({', '.join(map(str, turmas_antigas))}) que pode ultrapassar"
-                            )
         sobras_por_ciclo[data_referencia] = sobras_deste_ciclo
 
         # --- B) ABSORÇÃO ---
@@ -614,6 +606,51 @@ def quadro_geral_turma(df_inicial, df_final, df_inativos, ano):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"dl_turma_{ano}", use_container_width=True)
 
+def _resumir_pernadas(lista_alertas):
+    """Compacta os alertas de pernada de uma matrícula em faixas: agrupa por
+    (tipo, posto), unindo as turmas envolvidas e a faixa de datas (início→fim).
+    Assim dezenas de ciclos consecutivos viram uma linha só."""
+    grupos = {}
+    for a in lista_alertas:
+        g = grupos.setdefault((a['tipo'], a['posto']), {'datas': [], 'turmas': set()})
+        g['datas'].append(a['data'])
+        g['turmas'].update(a['turmas'])
+    resumo = []
+    for (tipo, posto), g in grupos.items():
+        datas = sorted(g['datas'])
+        resumo.append({'tipo': tipo, 'posto': posto, 'inicio': datas[0], 'fim': datas[-1],
+                       'n_ciclos': len(datas), 'turmas': sorted(g['turmas'])})
+    resumo.sort(key=lambda x: x['inicio'])
+    return resumo
+
+
+def _renderizar_pernadas(lista_alertas):
+    """Seção 'Pernadas' de uma matrícula: uma linha compacta por posto/tipo."""
+    if not lista_alertas:
+        st.caption("Nenhum risco de pernada nesta simulação para esta matrícula.")
+        return
+    resumo = _resumir_pernadas(lista_alertas)
+
+    def periodo(g):
+        ini, fim = g['inicio'].strftime('%d/%m/%Y'), g['fim'].strftime('%d/%m/%Y')
+        return ini if ini == fim else f"{ini} a {fim}"
+
+    for g in [x for x in resumo if x['tipo'] == 'levar']:
+        st.warning(
+            f"⚠️ **Pode LEVAR pernada** em **{g['posto']}** — {periodo(g)} ({g['n_ciclos']} ciclo(s)). "
+            f"Turma(s) mais nova(s) apta(s) no mesmo posto: {', '.join(map(str, g['turmas']))}."
+        )
+    for g in [x for x in resumo if x['tipo'] == 'dar']:
+        st.success(
+            f"⬆️ **Pode DAR pernada** em **{g['posto']}** — {periodo(g)} ({g['n_ciclos']} ciclo(s)). "
+            f"Turma(s) mais antiga(s) que pode ultrapassar: {', '.join(map(str, g['turmas']))}."
+        )
+    st.caption(
+        "Possibilidade aberta pelo *merecimento* (depende de cursos, não é público) — não é certeza. "
+        "O simulador em si promove só por antiguidade."
+    )
+
+
 def renderizar_spread_animado(res):
     """Animação do spread das turmas (turmas reais + turma teórica), com as
     matrículas acompanhadas (barra lateral) acesas em destaque e aposentadoria
@@ -669,32 +706,15 @@ def render_unico(res):
             for i, m in enumerate(matriculas_foco):
                 with sub_abas[i]:
                     riscos_m = alertas_risco.get(m, [])
-                    levar = [r for r in riscos_m if r['tipo'] == 'levar']
-                    dar = [r for r in riscos_m if r['tipo'] == 'dar']
-                    if levar:
-                        ciclos = len({r['data'] for r in levar})
-                        turmas = sorted({a for r in levar for a in r['turmas']})
-                        st.warning(
-                            f"⚠️ **Risco de LEVAR pernada** em {ciclos} ciclo(s): esta matrícula ficou apta e "
-                            f"sem vaga junto com turma(s) mais nova(s) ({', '.join(map(str, turmas))}) no mesmo "
-                            f"posto. Pelo merecimento, um militar mais novo pode ser promovido antes."
-                        )
-                    if dar:
-                        ciclos = len({r['data'] for r in dar})
-                        turmas = sorted({a for r in dar for a in r['turmas']})
-                        st.success(
-                            f"⬆️ **Chance de DAR pernada** em {ciclos} ciclo(s): esta matrícula ficou apta e sem "
-                            f"vaga junto com turma(s) mais antiga(s) ({', '.join(map(str, turmas))}) no mesmo "
-                            f"posto. Pelo merecimento, esta matrícula pode ultrapassar um militar mais antigo."
-                        )
-                    if levar or dar:
-                        st.caption(
-                            "Como o simulador segue apenas a antiguidade, estes marcadores indicam onde a "
-                            "*pernada* seria **possível** pelo merecimento (critério que depende de cursos e "
-                            "não é público) — não uma certeza. Veja as datas exatas na linha do tempo abaixo."
-                        )
-                    if not historicos[m]: st.info("Sem alterações.")
-                    for ev in historicos[m]: st.write(ev)
+                    n_pernadas = len({(r['tipo'], r['posto']) for r in riscos_m})
+                    aba_traj, aba_pern = st.tabs([
+                        "📋 Trajetória", f"🦵 Pernadas ({n_pernadas})" if n_pernadas else "🦵 Pernadas",
+                    ])
+                    with aba_traj:
+                        if not historicos[m]: st.info("Sem alterações.")
+                        for ev in historicos[m]: st.write(ev)
+                    with aba_pern:
+                        _renderizar_pernadas(riscos_m)
         else:
             st.info("Selecione matrículas na barra lateral.")
     with aba_spread:
