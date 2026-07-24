@@ -228,14 +228,19 @@ def simular_com_snapshots(df_input, vagas_base, data_alvo, tempo_apo, idade_apo,
 def vagas_migradas_qoa(df_condutores, df_musicos, data_alvo, tempo_apo, idade_apo):
     """Reproduz a migração de sobras (condutores + músicos) para o QOA (como no app)."""
     migradas = {}
+    # Índice fixo (res[3] = sobras) em vez de desempacotar a tupla inteira: o retorno
+    # de executar_simulacao_quadro já cresceu (6 -> 7 itens) e, no Streamlit Cloud,
+    # um hot-reload parcial pode deixar este módulo novo com um teste5 antigo na
+    # memória — o acesso por índice funciona com qualquer tamanho de tupla.
     if df_condutores is not None:
-        _, _, _, s_cond, _, _, _ = t5.executar_simulacao_quadro(
+        res_cond = t5.executar_simulacao_quadro(
             df_condutores, VAGAS_QOMT, data_alvo, tempo_apo, idade_apo, [])
-        for d, v in s_cond.items():
+        for d, v in res_cond[3].items():
             migradas[d] = dict(v)
     if df_musicos is not None:
-        _, _, _, s_mus, _, _, _ = t5.executar_simulacao_quadro(
+        res_mus = t5.executar_simulacao_quadro(
             df_musicos, VAGAS_QOM, data_alvo, tempo_apo, idade_apo, [])
+        s_mus = res_mus[3]
         base_praca = ['SD 1', 'CB', '3º SGT', '2º SGT', '1º SGT', 'SUB TEN']
         for d, v in s_mus.items():
             migradas.setdefault(d, {})
