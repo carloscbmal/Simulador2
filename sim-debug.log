@@ -1,0 +1,11 @@
+=== Simulator Debug Log Started ===
+Timestamp: 2026-07-09T16:19:14.726Z
+
+2026-07-09T16:19:20.949Z [L0]: [firmware_simulator]: simulator opening...
+2026-07-09T16:19:23.799Z [L0]: 7/9 [0]16:19:23.285 I/quickjs SBEngine: js_trigger_gc *****rt->malloc_gc_threshold is now 1121868, malloc_size 747912
+2026-07-09T16:19:24.117Z [L0]: 7/9 [0]16:19:23.603 I/quickjs-libc SBEngine: [jsrt-3.0.2-300] [2026-07-10T00:19:23.578Z] [jsfwk.debug] [ctx] [-] newCtx{"app":0,"module":0,"appId":1} 
+2026-07-09T16:19:24.144Z [L0]: 7/9 [0]16:19:23.630 I/quickjs-libc SBEngine: [jsrt-3.0.2-300] [2026-07-10T00:19:23.622Z] [jsfwk.debug] [ctx] [-] ctx{"app":0,"module":0,"appId":1}.apply=addFWListener["[Function bound handle]"] 
+2026-07-09T16:19:24.167Z [L0]: 7/9 [0]16:19:23.653 I/quickjs-libc SBEngine: [jsrt-3.0.2-300] [2026-07-10T00:19:23.649Z] [jsfwk.info ] [framework] [-] framework init 
+2026-07-09T16:19:24.174Z [L0]: 7/9 [0]16:19:23.660 I/quickjs-libc SBEngine: [jsrt-3.0.2-300] [2026-07-10T00:19:23.656Z] [jsfwk.info ] [framework] [-] framework version => 3.0 
+2026-07-09T16:19:24.180Z [L0]: 7/9 [0]16:19:23.666 I/quickjs-libc SBEngine: [jsrt-3.0.2-300] [2026-07-10T00:19:23.662Z] [jsfwk.info ] [framework] [-] framework buildDate => 2023-09-11T10:15:53.400Z 
+2026-07-09T16:19:24.187Z [L0]: 7/9 [0]16:19:23.673 I/quickjs-libc SBEngine: [jsrt-3.0.2-300] [2026-07-10T00:19:23.669Z] [jsfwk.info ] [framework] [-] framework commit => f99b6bb 
