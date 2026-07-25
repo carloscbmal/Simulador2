@@ -25,6 +25,38 @@ TEMPO_MINIMO = {
 
 POSTOS_COM_EXCEDENTE = ['CB', '3º SGT', '2º SGT', '2º TEN', '1º TEN', 'CAP']
 
+# Proporção merecimento (M) × antiguidade (A) por POSTO DE DESTINO: a ordem em que as
+# vagas do certame são preenchidas. O padrão é cíclico e o ponteiro NÃO zera a cada
+# certame — ele continua de onde parou. Ex.: um certame com 3 vagas de TEN CEL gasta
+# M,M,M; o certame seguinte começa na 4ª posição (M) e só depois vai para a 5ª (A).
+# Postos ausentes do dicionário são 100% antiguidade. Promoções de excedente (acima do
+# efetivo, por tempo) não ocupam vaga real e por isso NÃO avançam o ponteiro.
+PADRAO_PROMOCAO = {
+    '1º SGT':  ['M', 'A'],                 # 1/1
+    'SUB TEN': ['M', 'A'],                 # 1/1
+    'CAP':     ['M', 'A', 'A'],            # 1/3 por merecimento
+    'MAJ':     ['M', 'A', 'M', 'M', 'A'],  # 3/5 por merecimento
+    'TEN CEL': ['M', 'M', 'M', 'M', 'A'],  # 4/5 por merecimento
+}
+
+
+def sequencia_vagas(posto_destino, ponteiro, qtd_vagas):
+    """Ordem M/A das `qtd_vagas` vagas do certame neste posto, a partir do ponteiro."""
+    padrao = PADRAO_PROMOCAO.get(posto_destino)
+    if not padrao:
+        return ['A'] * int(qtd_vagas)
+    return [padrao[(ponteiro + j) % len(padrao)] for j in range(int(qtd_vagas))]
+
+
+def descrever_proporcao(posto_destino):
+    """'1 de cada 3 vagas por merecimento' — para exibir na UI."""
+    padrao = PADRAO_PROMOCAO.get(posto_destino)
+    if not padrao:
+        return "todas as vagas por antiguidade"
+    if padrao == ['M', 'A']:
+        return "vagas alternadas: 1 merecimento, 1 antiguidade"
+    return f"{padrao.count('M')} de cada {len(padrao)} vagas por merecimento"
+
 VAGAS_QOA = {
     'SD 1': 550, 'CB': 410, '3º SGT': 397, '2º SGT': 369, '1º SGT': 356,
     'SUB TEN': 150, '2º TEN': 65, '1º TEN': 55, 'CAP': 42, 'MAJ': 20, 'TEN CEL': 5, 'CEL': 9999
@@ -77,6 +109,20 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
                               idade_aposentadoria, matriculas_foco, vagas_extras_dict=None, 
                               usar_quantico=False, perc_quantico=0):
     df = df_input.copy()
+
+    # Antiguidade efetiva ('_ord'): 'Pos_Hierarquica' costuma vir vazia — a antiguidade
+    # real é a ordem das linhas do arquivo —, então materializamos a ordem uma vez só
+    # (sort estável: quem tem Pos_Hierarquica preenchida manda; empates/vazios mantêm a
+    # ordem do arquivo). Ao ser promovido, o militar recebe uma ordem NOVA, maior que a
+    # de todos que já estão no posto de destino: quem sobe antes fica na frente para
+    # sempre, e quem sobe no mesmo certame mantém a ordem relativa de antes. É por isso
+    # que quem sobe por merecimento, vindo lá de trás, chega como o mais moderno do
+    # grupo promovido naquele certame — o merecimento antecipa a subida, não muda a fila.
+    df = df.sort_values('Pos_Hierarquica', kind='stable').reset_index(drop=True)
+    df['_ord'] = range(len(df))
+    prox_ord = len(df)
+    ponteiro_padrao = {p: 0 for p in HIERARQUIA}  # 1ª vaga de cada posto = merecimento
+
     data_atual = pd.to_datetime(datetime.now().strftime('%d/%m/%Y'), dayfirst=True)
     
     datas_ciclo = []
@@ -153,78 +199,114 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
         for i in range(len(HIERARQUIA) - 1):
             posto_atual = HIERARQUIA[i]
             proximo_posto = HIERARQUIA[i+1]
-            candidatos = df[df['Posto_Graduacao'] == posto_atual].sort_values('Pos_Hierarquica')
+            candidatos = df[df['Posto_Graduacao'] == posto_atual].sort_values('_ord')
             limite_atual = vagas_limite_base.get(proximo_posto, 9999) + extras_hoje.get(proximo_posto, 0)
             ocupados_reais = len(df[(df['Posto_Graduacao'] == proximo_posto) & (df['Excedente'] != "x")])
             vagas_disponiveis = max(0, limite_atual - ocupados_reais)
             tempo_minimo_posto = TEMPO_MINIMO.get(posto_atual, 99)
-            registro_ciclo_posto = []  # p/ detectar risco de "furo de antiguidade" (merecimento)
+
+            # Divisão M/A das vagas deste certame (ponteiro cíclico, continua do certame
+            # anterior). Usada só para calcular pernada: a simulação em si promove por
+            # antiguidade, porque sem os pontos de merecimento não há como saber quem
+            # ganharia as vagas de escolha.
+            vagas_no_ciclo = int(vagas_disponiveis)
+            seq_vagas = sequencia_vagas(proximo_posto, ponteiro_padrao[proximo_posto], vagas_no_ciclo)
+            n_mer = seq_vagas.count('M')
+            n_ant = vagas_no_ciclo - n_mer
+            aptos_ciclo = []       # aptos ao interstício, em ordem de antiguidade
+            promovidos_reais = 0   # só vaga real avança o ponteiro
+            excedentes_ciclo = set()
 
             for idx, militar in candidatos.iterrows():
                 anos_no_posto = relativedelta(data_referencia, militar['Ultima_promocao']).years
+                apto = anos_no_posto >= tempo_minimo_posto
                 promoveu = False
                 # Vaga real tem prioridade: como os candidatos são percorridos por
-                # antiguidade (Pos_Hierarquica), o mais antigo apto ocupa a vaga aberta.
+                # antiguidade ('_ord'), o mais antigo apto ocupa a vaga aberta.
                 # Só depois de esgotadas as vagas reais os ≥6 anos restantes viram excedente.
-                if anos_no_posto >= tempo_minimo_posto and vagas_disponiveis > 0:
+                if apto and vagas_disponiveis > 0:
                     df.at[idx, 'Posto_Graduacao'] = proximo_posto
                     df.at[idx, 'Ultima_promocao'] = data_referencia
                     df.at[idx, 'Excedente'] = ""
                     vagas_disponiveis -= 1
+                    promovidos_reais += 1
                     promoveu = True
                 elif posto_atual in POSTOS_COM_EXCEDENTE and anos_no_posto >= 6:
                     df.at[idx, 'Posto_Graduacao'] = proximo_posto
                     df.at[idx, 'Ultima_promocao'] = data_referencia
                     df.at[idx, 'Excedente'] = "x"
+                    excedentes_ciclo.add(militar['Matricula'])
                     promoveu = True
 
                 if promoveu:
+                    df.at[idx, '_ord'] = prox_ord   # entra no fim da fila do posto novo
+                    prox_ord += 1
                     promocoes_ciclo_log[proximo_posto] += 1
                     tempos_promocao_log[proximo_posto].append(anos_no_posto) # Registra o gargalo
                     if militar['Matricula'] in historicos:
                         historicos[militar['Matricula']].append(f"✅ {data_referencia.strftime('%d/%m/%Y')}: Promovido a {proximo_posto}")
 
-                registro_ciclo_posto.append({
-                    'matricula': militar['Matricula'], 'promoveu': promoveu,
-                    'anos_no_posto': anos_no_posto, 'data_admissao': militar['Data_Admissao'],
-                })
+                if apto:
+                    aptos_ciclo.append({
+                        'matricula': militar['Matricula'], 'anos_no_posto': anos_no_posto,
+                        'data_admissao': militar['Data_Admissao'],
+                    })
+
+            if proximo_posto in PADRAO_PROMOCAO and promovidos_reais:
+                ponteiro_padrao[proximo_posto] = (
+                    (ponteiro_padrao[proximo_posto] + promovidos_reais) % len(PADRAO_PROMOCAO[proximo_posto])
+                )
 
             sobras_deste_ciclo[proximo_posto] = int(vagas_disponiveis)
 
             # --- ALERTA: "pernada" (merecimento passa à frente da antiguidade) ---
-            # Sempre que sobra mais de um apto sem vaga (aptos = anos_no_posto >= tempo
-            # mínimo, sem ter virado nem excedente) no mesmo posto/ciclo, todos eles estão
-            # empatados no único critério objetivo do simulador (tempo mínimo cumprido) —
-            # só a antiguidade os separa daqui pra frente, e é exatamente essa situação que
-            # abre espaço para o merecimento (não modelado aqui) reordená-los. "Turma" = ano
-            # de admissão. Dois lados: turma mais nova empatada -> risco de LEVAR pernada;
-            # turma mais antiga empatada -> chance de DAR pernada (ultrapassar o mais antigo).
-            if matriculas_foco:
-                estagnados = [r for r in registro_ciclo_posto
-                              if not r['promoveu'] and r['anos_no_posto'] >= tempo_minimo_posto]
-                if len(estagnados) > 1:
-                    for r in estagnados:
-                        if r['matricula'] not in alertas_risco or pd.isna(r['data_admissao']):
-                            continue
-                        ano_r = pd.Timestamp(r['data_admissao']).year
-                        anos_outros = [pd.Timestamp(e['data_admissao']).year for e in estagnados
-                                       if e['matricula'] != r['matricula'] and pd.notna(e['data_admissao'])]
-                        turmas_novas = sorted({a for a in anos_outros if a > ano_r})
-                        turmas_antigas = sorted({a for a in anos_outros if a < ano_r})
-
-                        # Registrado só em alertas_risco (estruturado). NÃO entra em
-                        # historicos: a trajetória de carreira e as pernadas são exibidas
-                        # separadamente, e as pernadas são compactadas em faixas na UI.
-                        if turmas_novas:
-                            alertas_risco[r['matricula']].append({
-                                'data': data_referencia, 'posto': posto_atual, 'tipo': 'levar',
-                                'anos_no_posto': r['anos_no_posto'], 'turmas': turmas_novas,
-                            })
-                        if turmas_antigas:
-                            alertas_risco[r['matricula']].append({
-                                'data': data_referencia, 'posto': posto_atual, 'tipo': 'dar',
-                                'anos_no_posto': r['anos_no_posto'], 'turmas': turmas_antigas,
-                            })
+            # Modelo: `k` = posição do militar na fila de aptos (por antiguidade), `V` =
+            # vagas do certame, das quais `n_ant` são de antiguidade e `n_mer` de
+            # merecimento. As vagas de antiguidade vão sempre para os mais antigos ainda
+            # não promovidos; as de merecimento podem ir para QUALQUER apto — o último a
+            # cumprir o interstício concorre em pé de igualdade com o primeiro. Logo:
+            #   k <= n_ant          -> promoção garantida, nenhuma pernada o alcança;
+            #   n_ant < k <= V      -> só sobe se as vagas de merecimento não forem para
+            #                          quem está abaixo do corte -> pode LEVAR pernada;
+            #   k > V               -> fora do corte da antiguidade, mas uma vaga de
+            #                          merecimento o promove -> pode DAR pernada.
+            # Se todos os aptos couberem nas vagas (len(aptos) <= V), ninguém é
+            # ultrapassado: sobem todos no mesmo certame e a ordem relativa é mantida.
+            if matriculas_foco and n_mer > 0 and len(aptos_ciclo) > vagas_no_ciclo:
+                n_abaixo = len(aptos_ciclo) - vagas_no_ciclo
+                anos_adm = [pd.Timestamp(a['data_admissao']).year if pd.notna(a['data_admissao'])
+                            else None for a in aptos_ciclo]
+                for pos0, r in enumerate(aptos_ciclo):
+                    k = pos0 + 1
+                    m = r['matricula']
+                    # Excedente sobe independente de vaga, proporção ou merecimento:
+                    # não há pernada a dar nem a levar no certame em que ele é promovido.
+                    if m not in alertas_risco or m in excedentes_ciclo or k <= n_ant:
+                        continue
+                    base = {'data': data_referencia, 'posto': posto_atual,
+                            'proximo_posto': proximo_posto, 'anos_no_posto': r['anos_no_posto'],
+                            'k': k, 'n_aptos': len(aptos_ciclo), 'vagas': vagas_no_ciclo,
+                            'n_mer': n_mer, 'n_ant': n_ant}
+                    if k <= vagas_no_ciclo:
+                        # Cai fora se `V - k + 1` vagas de merecimento forem para baixo dele.
+                        ameacas = min(n_mer, n_abaixo)
+                        folga = vagas_no_ciclo - k + 1
+                        if ameacas >= folga:
+                            turmas = sorted({a for a in anos_adm[vagas_no_ciclo:] if a})
+                            alertas_risco[m].append({**base, 'tipo': 'levar', 'folga': folga,
+                                                     'n_rivais': ameacas, 'turmas': turmas})
+                    else:
+                        # Ganhando uma vaga de merecimento ele entra no lugar de alguém e
+                        # ultrapassa todos os mais antigos que ficarem para trás:
+                        #  - mínimo `k - V`: mesmo que as outras V-1 vagas do certame fiquem
+                        #    todas com quem está acima dele, sobram k-1-(V-1) para trás;
+                        #  - máximo `k - 1 - n_ant`: se as outras vagas de merecimento também
+                        #    forem para baixo do corte, só os `n_ant` da antiguidade escapam.
+                        turmas = sorted({a for a in anos_adm[n_ant:pos0] if a})
+                        alertas_risco[m].append({**base, 'tipo': 'dar', 'turmas': turmas,
+                                                 'n_rivais': k - 1 - n_ant,
+                                                 'ultrapassa_min': k - vagas_no_ciclo,
+                                                 'ultrapassa_max': k - 1 - n_ant})
         sobras_por_ciclo[data_referencia] = sobras_deste_ciclo
 
         # --- B) ABSORÇÃO ---
@@ -232,7 +314,7 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
             limite_atual = vagas_limite_base.get(posto, 9999) + extras_hoje.get(posto, 0)
             vagas_abertas = limite_atual - len(df[(df['Posto_Graduacao'] == posto) & (df['Excedente'] != "x")])
             if vagas_abertas > 0:
-                excedentes = df[(df['Posto_Graduacao'] == posto) & (df['Excedente'] == "x")].sort_values('Pos_Hierarquica')
+                excedentes = df[(df['Posto_Graduacao'] == posto) & (df['Excedente'] == "x")].sort_values('_ord')
                 for idx_exc in excedentes.head(int(vagas_abertas)).index:
                     df.at[idx_exc, 'Excedente'] = ""
                     m_id = df.at[idx_exc, 'Matricula']
@@ -273,6 +355,10 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
                 if pd.notna(ano):
                     turmas_dist.setdefault(int(ano), {})[posto] = int(qtd)
         log_geral_mapas[data_referencia]['turmas_dist'] = turmas_dist
+
+    # '_ord' é interno (ordem de antiguidade viva) e não deve vazar para as planilhas.
+    df = df.drop(columns=['_ord'], errors='ignore')
+    df_inativos = df_inativos.drop(columns=['_ord'], errors='ignore')
 
     return df, df_inativos, historicos, sobras_por_ciclo, log_geral_mapas, tempos_promocao_log, alertas_risco
 
@@ -609,19 +695,53 @@ def quadro_geral_turma(df_inicial, df_final, df_inativos, ano):
 def _resumir_pernadas(lista_alertas):
     """Compacta os alertas de pernada de uma matrícula em faixas: agrupa por
     (tipo, posto), unindo as turmas envolvidas e a faixa de datas (início→fim).
-    Assim dezenas de ciclos consecutivos viram uma linha só."""
+    Assim dezenas de certames consecutivos viram uma linha só. Guarda também o
+    primeiro certame do grupo (o que interessa: é quando a pernada fica possível)
+    e o pior caso de militares envolvidos."""
     grupos = {}
     for a in lista_alertas:
-        g = grupos.setdefault((a['tipo'], a['posto']), {'datas': [], 'turmas': set()})
+        chave = (a['tipo'], a['posto'])
+        g = grupos.setdefault(chave, {'datas': [], 'turmas': set(), 'rivais': [], 'alertas': []})
         g['datas'].append(a['data'])
-        g['turmas'].update(a['turmas'])
+        g['turmas'].update(a.get('turmas') or [])
+        g['rivais'].append(a.get('n_rivais', 0))
+        g['alertas'].append(a)
     resumo = []
     for (tipo, posto), g in grupos.items():
+        primeiro = min(g['alertas'], key=lambda a: a['data'])
         datas = sorted(g['datas'])
+        # Melhor certame para DAR pernada: o que ultrapassa mais gente com garantia.
+        melhor = max(g['alertas'], key=lambda a: (a.get('ultrapassa_min', 0), a['data']))
         resumo.append({'tipo': tipo, 'posto': posto, 'inicio': datas[0], 'fim': datas[-1],
-                       'n_ciclos': len(datas), 'turmas': sorted(g['turmas'])})
+                       'n_ciclos': len(datas), 'turmas': sorted(g['turmas']),
+                       'max_rivais': max(g['rivais']) if g['rivais'] else 0,
+                       'primeiro': primeiro, 'melhor': melhor,
+                       'alertas': sorted(g['alertas'], key=lambda a: a['data'])})
     resumo.sort(key=lambda x: x['inicio'])
     return resumo
+
+
+def _tabela_pernadas(g):
+    """Certame a certame de um grupo de alertas, para o expander de detalhe."""
+    linhas = []
+    for a in g['alertas']:
+        linha = {
+            'Certame': a['data'].strftime('%d/%m/%Y'),
+            'Promoção a': a.get('proximo_posto', '?'),
+            'Sua posição': f"{a['k']}º de {a['n_aptos']} aptos",
+            'Vagas': a['vagas'],
+            'Merecimento': a['n_mer'],
+            'Antiguidade': a['n_ant'],
+        }
+        if a['tipo'] == 'dar':
+            ida, volta = a.get('ultrapassa_min', 0), a.get('ultrapassa_max', 0)
+            linha['Militares ultrapassados'] = (f"{ida}" if ida == volta else f"{ida} a {volta}")
+            linha['Precisa ficar em'] = f"top {a['n_mer']} de merecimento"
+        else:
+            linha['Podem te ultrapassar'] = a.get('n_rivais', 0)
+            linha['Você cai se'] = f"{a.get('folga', 1)} vaga(s) de merecimento vier(em) de baixo"
+        linhas.append(linha)
+    return pd.DataFrame(linhas)
 
 
 def _renderizar_pernadas(lista_alertas):
@@ -629,25 +749,63 @@ def _renderizar_pernadas(lista_alertas):
     if not lista_alertas:
         st.caption("Nenhum risco de pernada nesta simulação para esta matrícula.")
         return
+    if any('k' not in a for a in lista_alertas):
+        st.warning("Estes alertas foram gerados por uma versão anterior do app. "
+                   "Clique em **🚀 Processar Simulação Estratégica** novamente para "
+                   "recalcular as pernadas pela regra de merecimento.")
+        return
     resumo = _resumir_pernadas(lista_alertas)
 
     def periodo(g):
         ini, fim = g['inicio'].strftime('%d/%m/%Y'), g['fim'].strftime('%d/%m/%Y')
         return ini if ini == fim else f"{ini} a {fim}"
 
+    def detalhe(g):
+        a = g['primeiro']
+        prox = a.get('proximo_posto', '?')
+        return (f"No 1º certame ({a['data'].strftime('%d/%m/%Y')}): {a['vagas']} vaga(s) de "
+                f"**{prox}** — {a['n_mer']} por merecimento e {a['n_ant']} por antiguidade "
+                f"({descrever_proporcao(prox)}); você era o **{a['k']}º** de {a['n_aptos']} "
+                f"aptos ao interstício.")
+
     for g in [x for x in resumo if x['tipo'] == 'levar']:
         st.warning(
-            f"⚠️ **Pode LEVAR pernada** em **{g['posto']}** — {periodo(g)} ({g['n_ciclos']} ciclo(s)). "
-            f"Turma(s) mais nova(s) apta(s) no mesmo posto: {', '.join(map(str, g['turmas']))}."
+            f"⚠️ **Pode LEVAR pernada** em **{g['posto']}** — {periodo(g)} "
+            f"({g['n_ciclos']} certame(s)). Você está dentro do número de vagas, mas fora "
+            f"da parte garantida pela antiguidade: até **{g['max_rivais']}** militar(es) "
+            f"mais moderno(s) podem tomar as vagas de merecimento e te deslocar. "
+            f"Turma(s) abaixo do corte: {', '.join(map(str, g['turmas'])) or '—'}."
         )
+        st.caption(detalhe(g))
+        with st.expander(f"Ver certame a certame — {g['posto']} ({g['n_ciclos']})"):
+            st.dataframe(_tabela_pernadas(g), hide_index=True, use_container_width=True)
     for g in [x for x in resumo if x['tipo'] == 'dar']:
+        b = g['melhor']
+        ida, volta = b.get('ultrapassa_min', 0), b.get('ultrapassa_max', 0)
+        quantos = f"**{ida}**" if ida == volta else f"de **{ida}** a **{volta}**"
         st.success(
-            f"⬆️ **Pode DAR pernada** em **{g['posto']}** — {periodo(g)} ({g['n_ciclos']} ciclo(s)). "
-            f"Turma(s) mais antiga(s) que pode ultrapassar: {', '.join(map(str, g['turmas']))}."
+            f"⬆️ **Pode DAR pernada** em **{g['posto']}** — {periodo(g)} "
+            f"({g['n_ciclos']} certame(s)). Melhor certame: **{b['data'].strftime('%d/%m/%Y')}**, "
+            f"com {b['vagas']} vaga(s) de {b.get('proximo_posto', '?')} — **{b['n_mer']} por "
+            f"merecimento**. Ficando entre os **{b['n_mer']} melhores pontuados** do certame "
+            f"você pula {quantos} militar(es) mais antigo(s) "
+            f"(você era o {b['k']}º de {b['n_aptos']} aptos). "
+            f"Turma(s) ultrapassada(s) no período: {', '.join(map(str, g['turmas'])) or '—'}."
         )
+        st.caption(
+            f"{ida} é o piso: mesmo que as outras {b['vagas'] - 1} vagas do certame fiquem "
+            f"todas com quem está acima de você, {ida} mais antigos ficam para trás. "
+            f"O teto ({volta}) sai se as demais vagas de merecimento também forem para "
+            f"militares abaixo do corte da antiguidade."
+        )
+        with st.expander(f"Ver certame a certame — {g['posto']} ({g['n_ciclos']})"):
+            st.dataframe(_tabela_pernadas(g), hide_index=True, use_container_width=True)
     st.caption(
-        "Possibilidade aberta pelo *merecimento* (depende de cursos, não é público) — não é certeza. "
-        "O simulador em si promove só por antiguidade."
+        "As vagas de merecimento podem ir para qualquer apto ao interstício — o último a "
+        "cumprir concorre com o primeiro —, por isso o cálculo mostra a *possibilidade*, "
+        "não a certeza (depende dos pontos, que não são públicos). A simulação em si "
+        "promove só por antiguidade. Quem sobe por merecimento entra como o mais moderno "
+        "do grupo promovido naquele certame."
     )
 
 
