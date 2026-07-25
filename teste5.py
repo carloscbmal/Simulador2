@@ -57,6 +57,14 @@ def descrever_proporcao(posto_destino):
         return "vagas alternadas: 1 merecimento, 1 antiguidade"
     return f"{padrao.count('M')} de cada {len(padrao)} vagas por merecimento"
 
+def posicao_merecimento_apos_certame(posicao, n_mer):
+    """Nova posição na lista de merecimento depois de um certame que ofereceu `n_mer`
+    vagas de merecimento e NÃO alcançou o militar (n_mer < posicao): os `n_mer` que
+    estavam à frente dele foram promovidos e saíram da lista, então ele sobe `n_mer`
+    lugares — no limite chega a 1º e é o primeiro a ser chamado no certame seguinte."""
+    return max(1, int(posicao) - int(n_mer))
+
+
 VAGAS_QOA = {
     'SD 1': 550, 'CB': 410, '3º SGT': 397, '2º SGT': 369, '1º SGT': 356,
     'SUB TEN': 150, '2º TEN': 65, '1º TEN': 55, 'CAP': 42, 'MAJ': 20, 'TEN CEL': 5, 'CEL': 9999
@@ -105,10 +113,18 @@ def get_anos(data_ref, data_origem):
 
 import spread_view  # após get_anos: spread_view (via analise_spread) importa este módulo
 
-def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_aposentadoria, 
-                              idade_aposentadoria, matriculas_foco, vagas_extras_dict=None, 
-                              usar_quantico=False, perc_quantico=0):
+def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_aposentadoria,
+                              idade_aposentadoria, matriculas_foco, vagas_extras_dict=None,
+                              usar_quantico=False, perc_quantico=0, merecimento_dict=None):
+    """`merecimento_dict` = {Matricula: N} — cenário "e se eu der pernada": o militar se
+    auto-declara entre os N primeiros da lista de merecimento do posto. Ver
+    `posicao_merecimento_apos_certame` para a regra. Vazio/None = simulação normal
+    (100% antiguidade)."""
     df = df_input.copy()
+    merecimento_dict = {int(m): int(n) for m, n in (merecimento_dict or {}).items()}
+    # Posição viva na lista de merecimento de cada declarante (cai a cada certame).
+    pos_merecimento = dict(merecimento_dict)
+    eventos_merecimento = {m: [] for m in merecimento_dict}
 
     # Antiguidade efetiva ('_ord'): 'Pos_Hierarquica' costuma vir vazia — a antiguidade
     # real é a ordem das linhas do arquivo —, então materializamos a ordem uma vez só
@@ -217,7 +233,59 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
             promovidos_reais = 0   # só vaga real avança o ponteiro
             excedentes_ciclo = set()
 
+            # --- CENÁRIO "DER PERNADA": vagas de merecimento do declarante ---
+            # As vagas de merecimento são distribuídas ANTES das de antiguidade porque
+            # quem as leva pode estar em qualquer ponto da fila. Cada vaga tomada aqui
+            # é uma vaga real a menos para a fila de antiguidade — a pernada empurra
+            # os mais antigos que ficaram de fora para o certame seguinte.
+            idx_promovidos_merito = set()
+            ordem_pendente_merito = []   # '_ord' só no fim: ver comentário abaixo
+            if merecimento_dict and n_mer > 0:
+                aptos_acima = 0
+                for idx, militar in candidatos.iterrows():
+                    m = militar['Matricula']
+                    anos_no_posto = relativedelta(data_referencia, militar['Ultima_promocao']).years
+                    if anos_no_posto < tempo_minimo_posto:
+                        continue
+                    if m not in pos_merecimento:
+                        aptos_acima += 1
+                        continue
+                    posicao = pos_merecimento[m]
+                    if posicao > n_mer or vagas_disponiveis <= 0:
+                        # Não alcançado neste certame: sobe na lista para o próximo.
+                        pos_merecimento[m] = posicao_merecimento_apos_certame(posicao, n_mer)
+                        aptos_acima += 1
+                        continue
+                    df.at[idx, 'Posto_Graduacao'] = proximo_posto
+                    df.at[idx, 'Ultima_promocao'] = data_referencia
+                    df.at[idx, 'Excedente'] = ""
+                    ordem_pendente_merito.append(idx)
+                    vagas_disponiveis -= 1
+                    promovidos_reais += 1
+                    promocoes_ciclo_log[proximo_posto] += 1
+                    tempos_promocao_log[proximo_posto].append(anos_no_posto)
+                    idx_promovidos_merito.add(idx)
+                    # Quantos mais antigos ficam para trás: os aptos à frente dele que
+                    # não cabem nas vagas que sobraram para a antiguidade.
+                    ultrapassados = max(0, aptos_acima - int(vagas_disponiveis))
+                    eventos_merecimento[m].append({
+                        'data': data_referencia, 'posto': posto_atual,
+                        'proximo_posto': proximo_posto, 'anos_no_posto': anos_no_posto,
+                        'declarado': merecimento_dict[m], 'posicao': posicao,
+                        'vagas': vagas_no_ciclo, 'n_mer': n_mer, 'n_ant': n_ant,
+                        'aptos_acima': aptos_acima, 'ultrapassados': ultrapassados,
+                    })
+                    if m in historicos:
+                        historicos[m].append(
+                            f"🏅 {data_referencia.strftime('%d/%m/%Y')}: Promovido a {proximo_posto} "
+                            f"por MERECIMENTO ({posicao}º da lista, {n_mer} vaga(s) de merecimento) "
+                            f"— passou à frente de ~{ultrapassados} mais antigo(s)")
+                    # No posto novo ele volta a valer a declaração (top N daquele posto).
+                    pos_merecimento[m] = merecimento_dict[m]
+
             for idx, militar in candidatos.iterrows():
+                if idx in idx_promovidos_merito:
+                    continue
                 anos_no_posto = relativedelta(data_referencia, militar['Ultima_promocao']).years
                 apto = anos_no_posto >= tempo_minimo_posto
                 promoveu = False
@@ -245,12 +313,24 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
                     tempos_promocao_log[proximo_posto].append(anos_no_posto) # Registra o gargalo
                     if militar['Matricula'] in historicos:
                         historicos[militar['Matricula']].append(f"✅ {data_referencia.strftime('%d/%m/%Y')}: Promovido a {proximo_posto}")
+                    if militar['Matricula'] in pos_merecimento:
+                        # Subiu sem precisar do merecimento: no posto novo a lista é
+                        # outra e a auto-declaração volta a valer por inteiro.
+                        pos_merecimento[militar['Matricula']] = merecimento_dict[militar['Matricula']]
 
                 if apto:
                     aptos_ciclo.append({
                         'matricula': militar['Matricula'], 'anos_no_posto': anos_no_posto,
                         'data_admissao': militar['Data_Admissao'],
                     })
+
+            # '_ord' de quem subiu por merecimento: só agora, depois de todos os
+            # promovidos por antiguidade deste certame. A vaga de merecimento antecipa a
+            # subida, mas no posto novo ele é o mais moderno do grupo promovido — a
+            # mesma regra vale para o excedente e para a antiguidade.
+            for idx_m in ordem_pendente_merito:
+                df.at[idx_m, '_ord'] = prox_ord
+                prox_ord += 1
 
             if proximo_posto in PADRAO_PROMOCAO and promovidos_reais:
                 ponteiro_padrao[proximo_posto] = (
@@ -360,26 +440,27 @@ def executar_simulacao_quadro(df_input, vagas_limite_base, data_alvo, tempo_apos
     df = df.drop(columns=['_ord'], errors='ignore')
     df_inativos = df_inativos.drop(columns=['_ord'], errors='ignore')
 
-    return df, df_inativos, historicos, sobras_por_ciclo, log_geral_mapas, tempos_promocao_log, alertas_risco
+    return (df, df_inativos, historicos, sobras_por_ciclo, log_geral_mapas,
+            tempos_promocao_log, alertas_risco, eventos_merecimento)
 
 # Wrapper para rodar os cenários de forma limpa
-def rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_apo, idade_apo, matriculas_foco, usar_quantico, perc_quantico):
+def rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_apo, idade_apo, matriculas_foco, usar_quantico, perc_quantico, merecimento_dict=None):
     if tipo_simulacao == "QOA/QPC (Administrativo)":
         vagas_migradas = {}
         if df_condutores is not None:
-            _, _, _, s_cond, _, _, _ = executar_simulacao_quadro(df_condutores, VAGAS_QOMT, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
+            s_cond = executar_simulacao_quadro(df_condutores, VAGAS_QOMT, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)[3]
             for d, v in s_cond.items(): vagas_migradas[d] = v
         if df_musicos is not None:
-            _, _, _, s_mus, _, _, _ = executar_simulacao_quadro(df_musicos, VAGAS_QOM, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)
+            s_mus = executar_simulacao_quadro(df_musicos, VAGAS_QOM, data_alvo, tempo_apo, idade_apo, [], usar_quantico=usar_quantico, perc_quantico=perc_quantico)[3]
             for d, v in s_mus.items():
                 if d not in vagas_migradas: vagas_migradas[d] = {}
                 for p, q in v.items():
                     mq = q if p in ['SD 1', 'CB', '3º SGT', '2º SGT', '1º SGT', 'SUB TEN'] else math.ceil(q/2)
                     vagas_migradas[d][p] = vagas_migradas[d].get(p, 0) + mq
-        return executar_simulacao_quadro(df_ativo, VAGAS_QOA, data_alvo, tempo_apo, idade_apo, matriculas_foco, vagas_migradas, usar_quantico=usar_quantico, perc_quantico=perc_quantico)
+        return executar_simulacao_quadro(df_ativo, VAGAS_QOA, data_alvo, tempo_apo, idade_apo, matriculas_foco, vagas_migradas, usar_quantico=usar_quantico, perc_quantico=perc_quantico, merecimento_dict=merecimento_dict)
     else:
         vagas_base = VAGAS_QOMT if "Condutores" in tipo_simulacao else VAGAS_QOM
-        return executar_simulacao_quadro(df_ativo, vagas_base, data_alvo, tempo_apo, idade_apo, matriculas_foco, usar_quantico=usar_quantico, perc_quantico=perc_quantico)
+        return executar_simulacao_quadro(df_ativo, vagas_base, data_alvo, tempo_apo, idade_apo, matriculas_foco, usar_quantico=usar_quantico, perc_quantico=perc_quantico, merecimento_dict=merecimento_dict)
 
 
 # ==========================================
@@ -809,6 +890,128 @@ def _renderizar_pernadas(lista_alertas):
     )
 
 
+# ==========================================
+# CENÁRIO "E SE EU DER PERNADA?" (auto-declaração de merecimento)
+# ==========================================
+OPCOES_MERECIMENTO = {
+    "Entre os 5 primeiros": 5,
+    "Entre os 10 primeiros": 10,
+    "Entre os 20 primeiros": 20,
+}
+
+
+def _situacao_final(df_final, df_inativos, m):
+    """('Ativo'|'Inativo', posto_final) da matrícula `m` ao fim de uma simulação."""
+    estado = _estado_final_por_matricula(df_final, df_inativos)
+    sit, posto, exc = estado.get(m, ('—', '—', False))
+    return sit, (f"{posto} (excedente)" if exc else posto)
+
+
+def _rodar_cenario_pernada(res, m, n_declarado):
+    """Roda duas simulações gêmeas — base (só antiguidade) e com a auto-declaração de
+    merecimento da matrícula `m` — sob os mesmos parâmetros e sem Gerador Quântico,
+    para que a única diferença entre elas seja a pernada."""
+    args = (res['tipo_simulacao'], res['df_inicial'], res.get('df_condutores'),
+            res.get('df_musicos'), res['data_alvo'], res['tempo_apo'], res['idade_apo'],
+            [m], False, 0)
+    base = rodar_cenario(*args)
+    pern = rodar_cenario(*args, merecimento_dict={m: n_declarado})
+    return {
+        'base': {'df_final': base[0], 'df_inativos': base[1], 'historico': base[2].get(m, [])},
+        'pernada': {'df_final': pern[0], 'df_inativos': pern[1], 'historico': pern[2].get(m, []),
+                    'eventos': pern[7].get(m, [])},
+    }
+
+
+def _tabela_eventos_merecimento(eventos):
+    return pd.DataFrame([{
+        'Certame': e['data'].strftime('%d/%m/%Y'),
+        'Promoção a': e['proximo_posto'],
+        'Sua posição na lista': f"{e['posicao']}º",
+        'Vagas do certame': e['vagas'],
+        'Merecimento': e['n_mer'],
+        'Antiguidade': e['n_ant'],
+        'Mais antigos ultrapassados': e['ultrapassados'],
+        'Anos no posto': e['anos_no_posto'],
+    } for e in eventos])
+
+
+def renderizar_cenario_pernada(res, m):
+    """Simulação dentro da simulação: o usuário se auto-declara entre os N primeiros da
+    lista de merecimento e vê até onde chegaria dando pernada."""
+    if res.get('tipo_simulacao') is None:
+        st.warning("Estes resultados foram gerados por uma versão anterior do app. "
+                   "Clique em **🚀 Processar Simulação Estratégica** novamente.")
+        return
+
+    st.markdown(
+        "Os pontos de merecimento não são públicos, então **você declara** onde se "
+        "encaixa na lista de merecimento do seu posto. A cada certame, se as vagas de "
+        "merecimento alcançarem a sua posição, você é promovido — não importa quão "
+        "distante você esteja pela antiguidade. Se não alcançarem, quem estava à frente "
+        "subiu e **você fica mais perto do topo no certame seguinte**."
+    )
+    rotulo = st.radio("Eu me declaro:", list(OPCOES_MERECIMENTO.keys()),
+                      horizontal=True, key=f"pernada_opt_{m}")
+    n_declarado = OPCOES_MERECIMENTO[rotulo]
+
+    if res.get('usar_quantico'):
+        st.caption("O Gerador Quântico fica **desligado** nos dois cenários abaixo — "
+                   "com saídas aleatórias a comparação não seria entre iguais.")
+
+    cache = st.session_state.setdefault('pernada_cache', {})
+    chave = (m, n_declarado)
+    if st.button(f"🎯 Simular pernada ({rotulo.lower()})", key=f"pernada_btn_{m}",
+                 use_container_width=True):
+        with st.spinner("Rodando os dois cenários (base × merecimento)..."):
+            cache[chave] = _rodar_cenario_pernada(res, m, n_declarado)
+
+    dados = cache.get(chave)
+    if not dados:
+        st.info("Escolha a faixa e clique em **🎯 Simular pernada** para comparar.")
+        return
+
+    sit_b, posto_b = _situacao_final(dados['base']['df_final'], dados['base']['df_inativos'], m)
+    sit_p, posto_p = _situacao_final(dados['pernada']['df_final'], dados['pernada']['df_inativos'], m)
+    niveis = NIVEL_POSTO.get(posto_p.split(' (')[0], -1) - NIVEL_POSTO.get(posto_b.split(' (')[0], -1)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("📋 Só por antiguidade", posto_b, help=f"Situação final: {sit_b}")
+    c2.metric("🏅 Dando pernada", posto_p, help=f"Situação final: {sit_p}")
+    c3.metric("⬆️ Ganho", f"+{niveis} posto(s)" if niveis > 0 else "sem ganho")
+
+    eventos = dados['pernada']['eventos']
+    if eventos:
+        st.markdown("##### Promoções ganhas por merecimento")
+        st.dataframe(_tabela_eventos_merecimento(eventos), hide_index=True,
+                     use_container_width=True)
+    else:
+        st.info(
+            f"Declarando-se {rotulo.lower()}, nenhuma promoção sua saiu por merecimento "
+            f"até {res['data_alvo'].strftime('%d/%m/%Y')} — ou você já subia pela "
+            f"antiguidade antes de a lista te alcançar, ou os certames do seu posto não "
+            f"abriram vagas de merecimento suficientes."
+        )
+
+    col_b, col_p = st.columns(2)
+    with col_b:
+        st.markdown("**📋 Trajetória base (só antiguidade)**")
+        if not dados['base']['historico']: st.caption("Sem alterações.")
+        for ev in dados['base']['historico']: st.write(ev)
+    with col_p:
+        st.markdown("**🏅 Trajetória dando pernada**")
+        if not dados['pernada']['historico']: st.caption("Sem alterações.")
+        for ev in dados['pernada']['historico']: st.write(ev)
+
+    st.caption(
+        "Cada vaga de merecimento que você toma é uma vaga real a menos para a fila da "
+        "antiguidade: os mais antigos que ficaram de fora escorregam para o certame "
+        "seguinte, e o restante do quadro é simulado com esse efeito embutido. Ao chegar "
+        "ao posto novo você entra como o mais moderno do grupo promovido no certame e a "
+        f"declaração volta a valer (top {n_declarado} da lista daquele posto)."
+    )
+
+
 def renderizar_spread_animado(res):
     """Animação do spread das turmas (turmas reais + turma teórica), com as
     matrículas acompanhadas (barra lateral) acesas em destaque e aposentadoria
@@ -872,14 +1075,17 @@ def render_unico(res):
                 with sub_abas[i]:
                     riscos_m = alertas_risco.get(m, [])
                     n_pernadas = len({(r['tipo'], r['posto']) for r in riscos_m})
-                    aba_traj, aba_pern = st.tabs([
+                    aba_traj, aba_pern, aba_cenario = st.tabs([
                         "📋 Trajetória", f"🦵 Pernadas ({n_pernadas})" if n_pernadas else "🦵 Pernadas",
+                        "🎯 E se eu der pernada?",
                     ])
                     with aba_traj:
                         if not historicos[m]: st.info("Sem alterações.")
                         for ev in historicos[m]: st.write(ev)
                     with aba_pern:
                         _renderizar_pernadas(riscos_m)
+                    with aba_cenario:
+                        renderizar_cenario_pernada(res, m)
         else:
             st.info("Selecione matrículas na barra lateral.")
     with aba_spread:
@@ -1001,21 +1207,27 @@ def main():
             data_alvo = pd.to_datetime(data_alvo_input)
             with st.spinner('Processando matrizes multidimensionais...'):
                 if comparar_cenarios:
-                    df_fin_A, df_in_A, _, _, log_A, _, _ = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
-                    df_fin_B, df_in_B, _, _, log_B, _, _ = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_b, idade_b, matriculas_foco, usar_quantico, perc_quantico)
+                    res_A = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
+                    res_B = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_b, idade_b, matriculas_foco, usar_quantico, perc_quantico)
+                    df_fin_A, df_in_A, log_A = res_A[0], res_A[1], res_A[4]
+                    df_fin_B, df_in_B, log_B = res_B[0], res_B[1], res_B[4]
                     st.session_state['resultado'] = {
                         'modo': 'comparar', 'data_alvo': data_alvo, 'df_inicial': df_ativo.copy(),
                         'tempo_a': tempo_a, 'idade_a': idade_a, 'tempo_b': tempo_b, 'idade_b': idade_b,
                         'A': (df_fin_A, df_in_A, log_A), 'B': (df_fin_B, df_in_B, log_B),
                     }
                 else:
-                    df_final, df_inativos, historicos, _, log_mapas, tempos_log, alertas_risco = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
+                    res_u = rodar_cenario(tipo_simulacao, df_ativo, df_condutores, df_musicos, data_alvo, tempo_a, idade_a, matriculas_foco, usar_quantico, perc_quantico)
+                    df_final, df_inativos, historicos = res_u[0], res_u[1], res_u[2]
+                    log_mapas, tempos_log, alertas_risco = res_u[4], res_u[5], res_u[6]
+                    st.session_state['pernada_cache'] = {}   # cenários de pernada da simulação anterior
                     st.session_state['resultado'] = {
                         'modo': 'unico', 'data_alvo': data_alvo, 'df_inicial': df_ativo.copy(),
                         'df_final': df_final, 'df_inativos': df_inativos, 'historicos': historicos,
                         'log_mapas': log_mapas, 'tempos_log': tempos_log, 'matriculas_foco': matriculas_foco,
                         'alertas_risco': alertas_risco,
                         'tipo_simulacao': tipo_simulacao, 'tempo_apo': tempo_a, 'idade_apo': idade_a,
+                        'usar_quantico': usar_quantico,
                         'df_condutores': df_condutores, 'df_musicos': df_musicos,
                     }
 
